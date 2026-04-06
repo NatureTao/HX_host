@@ -117,6 +117,7 @@ import kotlin.math.exp
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.random.Random
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -218,6 +219,8 @@ data class NcnnObject(val x: Float, val y: Float, val w: Float, val h: Float, va
 
 private data class RuntimeAimbotConfig(
     val enabled: Boolean,
+    val autoAimEnabled: Boolean,
+    val autoFireEnabled: Boolean,
     val sensitivity: Float,
     val yOffsetPercents: List<Int>,
     val aimMode: String,
@@ -225,7 +228,14 @@ private data class RuntimeAimbotConfig(
     val enabledCategories: List<Boolean>,
     val categoryPriorityEnabled: Boolean,
     val categoryOrder: List<Int>,
-    val triggerMask: Int
+    val triggerMask: Int,
+    val fireRangePx: Float,
+    val initialDelayMs: Int,
+    val minClick: Int,
+    val maxClick: Int,
+    val minIntervalMs: Int,
+    val maxIntervalMs: Int,
+    val burstIntervalMs: Int
 ) {
     fun yOffsetFor(label: Int): Int {
         val fallback = yOffsetPercents.firstOrNull() ?: 50
@@ -248,6 +258,34 @@ private data class RuntimeAimbotConfig(
         return if (idx >= 0) idx else Int.MAX_VALUE
     }
 }
+
+private data class PdRuntimeSnapshot(
+    val active: Boolean = false,
+    val targetId: Int = -1,
+    val errX: Float = 0f,
+    val errY: Float = 0f,
+    val pdOutX: Float = 0f,
+    val pdOutY: Float = 0f,
+    val smoothOutX: Float = 0f,
+    val smoothOutY: Float = 0f,
+    val moveX: Int = 0,
+    val moveY: Int = 0,
+    val clampX: Boolean = false,
+    val clampY: Boolean = false,
+    val inFireRange: Boolean = false,
+    val autoFireState: String = "idle"
+)
+
+private data class MakcuButtonsParseState(
+    val pendingBytes: ByteArrayOutputStream = ByteArrayOutputStream(),
+    var snapshotMaskCache: Int = 0
+)
+
+private data class MakcuButtonsParseResult(
+    val mask: Int,
+    val source: String,
+    val dataPreview: ByteArray
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1035,9 +1073,18 @@ private object RuntimeBridge {
     @Volatile var hotkeys: List<HotkeyConfig> = emptyList()
 
     private val moveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val autoFireScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val moveQueue = Channel<Pair<Int, Int>>(Channel.CONFLATED)
     private val sessionRef = AtomicReference<MakcuUsbSession?>(null)
     private val lastMoveErrorMs = AtomicLong(0L)
+    private val lastButtonErrorMs = AtomicLong(0L)
+    private val autoFireLock = Any()
+    private var autoFireWanted = false
+    private var autoFireConfig: RuntimeAimbotConfig? = null
+    private var autoFireArmedSinceMs = 0L
+    @Volatile private var autoFireStatus: String = "idle"
+    @Volatile private var fireButtonPressed: Boolean = false
+    private val autoFireRandom = Random(System.currentTimeMillis())
 
     init {
         moveScope.launch {
@@ -1061,6 +1108,65 @@ private object RuntimeBridge {
                 }
             }
         }
+        autoFireScope.launch {
+            while (isActive) {
+                val snapshot = synchronized(autoFireLock) {
+                    Triple(autoFireWanted, autoFireConfig, autoFireArmedSinceMs)
+                }
+                val wanted = snapshot.first
+                val cfg = snapshot.second
+                if (!wanted || cfg == null || !cfg.autoFireEnabled) {
+                    autoFireStatus = "idle"
+                    synchronized(autoFireLock) {
+                        autoFireArmedSinceMs = 0L
+                    }
+                    if (fireButtonPressed) {
+                        sendFireButton(pressed = false)
+                    }
+                    delay(18)
+                    continue
+                }
+
+                val now = System.currentTimeMillis()
+                if (snapshot.third <= 0L) {
+                    synchronized(autoFireLock) {
+                        autoFireArmedSinceMs = now
+                    }
+                    autoFireStatus = "arming"
+                    delay(8)
+                    continue
+                }
+
+                val waitMs = cfg.initialDelayMs.toLong() - (now - snapshot.third)
+                if (waitMs > 0L) {
+                    autoFireStatus = "arming"
+                    delay(waitMs.coerceAtMost(18L))
+                    continue
+                }
+
+                autoFireStatus = "firing"
+                val clickCount = autoFireRandom.nextInt(cfg.minClick, cfg.maxClick + 1)
+                for (i in 0 until clickCount) {
+                    val stillWanted = synchronized(autoFireLock) { autoFireWanted && autoFireConfig?.autoFireEnabled == true }
+                    if (!stillWanted) break
+
+                    val pressResult = sendFireButton(pressed = true)
+                    if (pressResult.success) {
+                        delay(18)
+                    } else {
+                        delay(30)
+                    }
+                    sendFireButton(pressed = false)
+
+                    if (i < clickCount - 1) {
+                        val interval = autoFireRandom.nextInt(cfg.minIntervalMs, cfg.maxIntervalMs + 1)
+                        delay(interval.toLong())
+                    }
+                }
+                autoFireStatus = "cooldown"
+                delay(cfg.burstIntervalMs.toLong().coerceAtLeast(10L))
+            }
+        }
     }
 
     fun bindSession(session: MakcuUsbSession?) {
@@ -1073,9 +1179,49 @@ private object RuntimeBridge {
         moveQueue.trySend(dx to dy)
     }
 
+    fun updateAutoFire(enabled: Boolean, cfg: RuntimeAimbotConfig?) {
+        synchronized(autoFireLock) {
+            val nextEnabled = enabled && cfg?.autoFireEnabled == true
+            if (!nextEnabled) {
+                autoFireWanted = false
+                autoFireConfig = null
+                autoFireArmedSinceMs = 0L
+            } else {
+                if (!autoFireWanted) {
+                    autoFireArmedSinceMs = 0L
+                }
+                autoFireWanted = true
+                autoFireConfig = cfg
+            }
+        }
+        if (!enabled) autoFireStatus = "idle"
+    }
+
+    fun autoFireState(): String = autoFireStatus
+
+    private suspend fun sendFireButton(pressed: Boolean): UsbSendResult {
+        val session = sessionRef.get()
+        val result = when {
+            session != null -> session.sendMouseButton(0x01, pressed)
+            MakcuSerialEngine.isConnected() -> MakcuSerialEngine.sendMouseButton(0x01, pressed)
+            else -> UsbSendResult(success = false, message = "未连接")
+        }
+        if (result.success) {
+            fireButtonPressed = pressed
+        }
+        if (!result.success && pressed) {
+            val now = System.currentTimeMillis()
+            val last = lastButtonErrorMs.get()
+            if (now - last > 1500 && lastButtonErrorMs.compareAndSet(last, now)) {
+                MakcuLinkRuntime.updateStatus("自动射击写入失败: ${result.message}")
+            }
+        }
+        return result
+    }
+
     fun pickAimbotConfig(pressedMask: Int): RuntimeAimbotConfig? {
         val activeHotkeys = hotkeys.asSequence()
-            .filter { it.enabled && it.autoAim }
+            .filter { it.enabled && (it.autoAim || it.autoFire) }
             .toList()
         if (activeHotkeys.isEmpty()) return null
         val normalizedPressed = pressedMask and 0x1F
@@ -1092,6 +1238,8 @@ private object RuntimeBridge {
         }
         return RuntimeAimbotConfig(
             enabled = true,
+            autoAimEnabled = hotkey.autoAim,
+            autoFireEnabled = hotkey.autoFire,
             sensitivity = hotkey.sensitivity.coerceIn(0.05f, 1.0f),
             yOffsetPercents = yOffsets,
             aimMode = if (hotkey.aimMode == "recent_crosshair") "recent_crosshair" else "class_priority",
@@ -1099,8 +1247,213 @@ private object RuntimeBridge {
             enabledCategories = categories,
             categoryPriorityEnabled = hotkey.categoryPriorityEnabled,
             categoryOrder = normalizeCategoryOrder(hotkey.categoryOrder),
-            triggerMask = hotkeyTriggerMask(hotkey.trigger).takeIf { it != 0 } ?: 0x02
+            triggerMask = hotkeyTriggerMask(hotkey.trigger).takeIf { it != 0 } ?: 0x02,
+            fireRangePx = hotkey.fireRangePx.coerceIn(0f, 30f),
+            initialDelayMs = hotkey.initialDelayMs.coerceIn(0, 500),
+            minClick = hotkey.minClick.coerceIn(1, 10),
+            maxClick = hotkey.maxClick.coerceIn(hotkey.minClick.coerceIn(1, 10), 10),
+            minIntervalMs = hotkey.minIntervalMs.coerceIn(10, 500),
+            maxIntervalMs = hotkey.maxIntervalMs.coerceIn(hotkey.minIntervalMs.coerceIn(10, 500), 500),
+            burstIntervalMs = hotkey.burstIntervalMs.coerceIn(10, 1000)
         )
+    }
+}
+
+private data class MakcuButtonsParserOptions(
+    val allowBareButtonsToken: Boolean,
+    val strictBinaryZeroGuard: Boolean
+)
+
+private object MakcuButtonsParser {
+    private val buttonsCallRegex = Regex(
+        """(?:k[mM]\.|[mM]\.)?buttons\(\s*([0-9a-fbx]+)\s*\)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val buttonsKvRegex = Regex(
+        """(?:k[mM]\.|[mM]\.)?buttons\s*[:=]\s*([0-9a-fbx]+)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val buttonAliasRegexes = listOf(
+        0x01 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:left|lbutton)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE),
+        0x02 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:right|rbutton)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE),
+        0x04 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:middle|mbutton)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE),
+        0x08 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:side1|x1|xbutton1)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE),
+        0x10 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:side2|x2|xbutton2)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE)
+    )
+    private val binaryTokens = listOf(
+        "km.buttons".toByteArray(Charsets.US_ASCII),
+        "kM.buttons".toByteArray(Charsets.US_ASCII),
+        "m.buttons".toByteArray(Charsets.US_ASCII),
+        "M.buttons".toByteArray(Charsets.US_ASCII)
+    )
+    private val bareButtonsToken = "buttons".toByteArray(Charsets.US_ASCII)
+
+    fun reset(state: MakcuButtonsParseState) {
+        state.snapshotMaskCache = 0
+        state.pendingBytes.reset()
+    }
+
+    fun parse(
+        state: MakcuButtonsParseState,
+        buffer: ByteArray,
+        count: Int,
+        options: MakcuButtonsParserOptions
+    ): MakcuButtonsParseResult? {
+        if (count > 0) {
+            state.pendingBytes.write(buffer, 0, count)
+        }
+        val data = state.pendingBytes.toByteArray()
+        if (data.isEmpty()) return null
+
+        fun emit(mask: Int, consumed: Int, source: String): MakcuButtonsParseResult {
+            trimPending(state, data, consumed)
+            return MakcuButtonsParseResult(mask = mask and 0xFFFF, source = source, dataPreview = data.copyOf())
+        }
+
+        parseV2ButtonsFrame(data)?.let { return emit(it.first, it.second, "v2") }
+
+        val text = data.toString(Charsets.ISO_8859_1)
+        buttonsCallRegex.findAll(text).lastOrNull()?.let { match ->
+            val mask = parseMaskToken(match.groupValues.getOrNull(1)) ?: return@let
+            return emit(mask, match.range.last + 1, "text()")
+        }
+        buttonsKvRegex.findAll(text).lastOrNull()?.let { match ->
+            val mask = parseMaskToken(match.groupValues.getOrNull(1)) ?: return@let
+            return emit(mask, match.range.last + 1, "text:=")
+        }
+
+        parsePerButtonEvents(text, state)?.let { return emit(it.first, it.second, "event") }
+        parseBinaryAfterButtonsToken(data, options.allowBareButtonsToken)?.let {
+            return emit(it.first, it.second, "token")
+        }
+        parseBinaryButtonsFrameStrict(data, options.strictBinaryZeroGuard)?.let {
+            return emit(it.first, it.second, "binary")
+        }
+        parseHidStyleButtonsReport(data)?.let { return emit(it.first, it.second, "hid") }
+
+        if (data.size > 64) {
+            trimPending(state, data, data.size - 64)
+        }
+        return null
+    }
+
+    private fun parsePerButtonEvents(text: String, state: MakcuButtonsParseState): Pair<Int, Int>? {
+        var consumed = -1
+        var matched = false
+        buttonAliasRegexes.forEach { (bit, regex) ->
+            regex.findAll(text).forEach { match ->
+                matched = true
+                val pressed = match.groupValues.getOrNull(1) == "1"
+                state.snapshotMaskCache = if (pressed) {
+                    state.snapshotMaskCache or bit
+                } else {
+                    state.snapshotMaskCache and bit.inv()
+                }
+                consumed = maxOf(consumed, match.range.last + 1)
+            }
+        }
+        if (!matched || consumed <= 0) return null
+        return (state.snapshotMaskCache and 0x1F) to consumed
+    }
+
+    private fun parseBinaryAfterButtonsToken(data: ByteArray, allowBareButtonsToken: Boolean): Pair<Int, Int>? {
+        val tokens = if (allowBareButtonsToken) binaryTokens + listOf(bareButtonsToken) else binaryTokens
+        tokens.forEach { token ->
+            val tokenIndex = indexOfSubArray(data, token)
+            if (tokenIndex < 0) return@forEach
+            val nextIndex = tokenIndex + token.size
+            if (nextIndex >= data.size) return@forEach
+            val value = data[nextIndex].toInt() and 0xFF
+            if (value > 0x1F) return@forEach
+            return value to (nextIndex + 1)
+        }
+        return null
+    }
+
+    private fun parseBinaryButtonsFrameStrict(data: ByteArray, strictZeroGuard: Boolean): Pair<Int, Int>? {
+        for (i in 0 until (data.size - 2)) {
+            if ((data[i].toInt() and 0xFF) != 0x02) continue
+            val prev = if (i > 0) (data[i - 1].toInt() and 0xFF) else -1
+            val prevLooksDelimiter = (i == 0) || prev == 0x0A || prev == 0x0D || prev == 0x3E || prev < 0x20
+            if (!prevLooksDelimiter) continue
+
+            val lo = data[i + 1].toInt() and 0xFF
+            val hi = data[i + 2].toInt() and 0xFF
+            if (hi != 0x00 || lo !in 0..0x1F) continue
+
+            if (strictZeroGuard && lo == 0) {
+                val next = if (i + 3 < data.size) (data[i + 3].toInt() and 0xFF) else 0x0A
+                val nextOk = (i + 3 >= data.size) || next == 0x02 || next == 0x0A || next == 0x0D || next == 0x3E || next < 0x20
+                if (!nextOk) continue
+            }
+            return (lo and 0x1F) to (i + 3)
+        }
+        return null
+    }
+
+    private fun parseHidStyleButtonsReport(data: ByteArray): Pair<Int, Int>? {
+        if (data.size < 4) return null
+        val start = (data.size - 32).coerceAtLeast(0)
+        for (i in (data.size - 4) downTo start) {
+            val b0 = data[i].toInt() and 0xFF
+            if (b0 !in 0..0x1F) continue
+            val b1 = data[i + 1].toInt() and 0xFF
+            val b2 = data[i + 2].toInt() and 0xFF
+            val b3 = data[i + 3].toInt() and 0xFF
+            val tailPrintable = (b1 in 0x20..0x7E) && (b2 in 0x20..0x7E) && (b3 in 0x20..0x7E)
+            if (tailPrintable) continue
+            val promptEcho = (b1 == 0x3E && b2 == 0x3E) || (b2 == 0x3E && b3 == 0x3E)
+            if (promptEcho) continue
+            val lineBreakEcho = (b0 == 0x0A || b0 == 0x0D || b0 == 0x09) &&
+                (b1 in 0x20..0x7E || b2 in 0x20..0x7E || b3 in 0x20..0x7E)
+            if (lineBreakEcho) continue
+            return b0 to (i + 4)
+        }
+        return null
+    }
+
+    private fun parseV2ButtonsFrame(data: ByteArray): Pair<Int, Int>? {
+        var index = 0
+        while (index + 4 <= data.size) {
+            if ((data[index].toInt() and 0xFF) != MAKCU_V2_FRAME_HEAD) {
+                index++
+                continue
+            }
+            val cmd = data[index + 1].toInt() and 0xFF
+            val len = (data[index + 2].toInt() and 0xFF) or ((data[index + 3].toInt() and 0xFF) shl 8)
+            if (len < 0 || len > 1024) {
+                index++
+                continue
+            }
+            val frameEnd = index + 4 + len
+            if (frameEnd > data.size) return null
+            if (cmd == MAKCU_V2_CMD_BUTTONS && len > 0) {
+                val b0 = data[index + 4].toInt() and 0xFF
+                val b1 = if (len > 1) (data[index + 5].toInt() and 0xFF) else 0
+                val looksConfigAck = len >= 2 && b0 in 0..2 && b1 in 1..255
+                if (!looksConfigAck) {
+                    if (len == 1 && b0 <= 0x1F) {
+                        return b0 to frameEnd
+                    }
+                    if (len >= 2) {
+                        val mask16 = (b0 or (b1 shl 8)) and 0xFFFF
+                        if ((b1 == 0 && b0 <= 0x1F) || (mask16 != 0 && (b1 == 0 || b0 == 0))) {
+                            return mask16 to frameEnd
+                        }
+                    }
+                }
+            }
+            index = frameEnd
+        }
+        return null
+    }
+
+    private fun trimPending(state: MakcuButtonsParseState, data: ByteArray, consumed: Int) {
+        val safe = consumed.coerceIn(0, data.size)
+        state.pendingBytes.reset()
+        if (safe < data.size) {
+            state.pendingBytes.write(data, safe, data.size - safe)
+        }
     }
 }
 
@@ -1112,7 +1465,7 @@ private object MakcuSerialEngine {
 
     private val writeLock = Mutex()
     private val parseLock = Any()
-    private val pendingBytes = ByteArrayOutputStream()
+    private val parserState = MakcuButtonsParseState()
     private var serialPort: UsbSerialPort? = null
     private var usbConnection: UsbDeviceConnection? = null
     private val rawClaimedInterfaces = mutableListOf<UsbInterface>()
@@ -1120,7 +1473,6 @@ private object MakcuSerialEngine {
     private val rawInEndpoints = mutableListOf<UsbEndpoint>()
     @Volatile private var lastMoveSendMs: Long = 0L
     private var snapshotCursor: Int = 0
-    private var snapshotMaskCache: Int = 0
     @Volatile private var debugLastHex: String = "--"
     @Volatile private var debugLastParser: String = "init"
     @Volatile private var debugLastMask: Int = -1
@@ -1260,9 +1612,8 @@ private object MakcuSerialEngine {
                 rawOutEndpoints.clear()
                 rawInEndpoints.clear()
                 deviceId = device.deviceId
-                pendingBytes.reset()
                 snapshotCursor = 0
-                snapshotMaskCache = 0
+                MakcuButtonsParser.reset(parserState)
                 debugLastHex = "--"
                 debugLastParser = "connected"
                 debugLastMask = -1
@@ -1309,8 +1660,7 @@ private object MakcuSerialEngine {
         rawInEndpoints.clear()
         deviceId = -1
         snapshotCursor = 0
-        snapshotMaskCache = 0
-        pendingBytes.reset()
+        MakcuButtonsParser.reset(parserState)
         debugLastHex = "--"
         debugLastParser = "disconnected"
         debugLastMask = -1
@@ -1340,6 +1690,35 @@ private object MakcuSerialEngine {
                 UsbSendResult(false, "写入异常")
             }
         }
+    }
+
+    private suspend fun sendCommandCompatible(rawCommand: String): UsbSendResult {
+        val commands = buildMakcuCommandVariants(rawCommand).take(6)
+        if (commands.isEmpty()) return UsbSendResult(false, "命令为空")
+        commands.forEach { candidate ->
+            val result = sendCommandExact(candidate)
+            if (result.success) return result
+        }
+        return UsbSendResult(false, "兼容写入失败")
+    }
+
+    suspend fun sendMouseButton(buttonMask: Int, pressed: Boolean): UsbSendResult {
+        val aliases = when (buttonMask and 0x1F) {
+            0x01 -> listOf("left", "lbutton")
+            0x02 -> listOf("right", "rbutton")
+            0x04 -> listOf("middle", "mbutton")
+            0x08 -> listOf("side1", "x1", "xbutton1")
+            0x10 -> listOf("side2", "x2", "xbutton2")
+            else -> emptyList()
+        }
+        if (aliases.isEmpty()) return UsbSendResult(false, "不支持的按键")
+        lastMoveSendMs = System.currentTimeMillis()
+        val value = if (pressed) 1 else 0
+        aliases.forEach { alias ->
+            val result = sendCommandCompatible("$alias($value)")
+            if (result.success) return result
+        }
+        return UsbSendResult(false, "按键写入失败")
     }
 
     suspend fun primeButtonsStream() {
@@ -1375,247 +1754,21 @@ private object MakcuSerialEngine {
 
     private fun parseButtonsMask(buffer: ByteArray, count: Int): Int? {
         synchronized(parseLock) {
-            if (count > 0) {
-                pendingBytes.write(buffer, 0, count)
+            val result = MakcuButtonsParser.parse(
+                state = parserState,
+                buffer = buffer,
+                count = count,
+                options = MakcuButtonsParserOptions(
+                    allowBareButtonsToken = true,
+                    strictBinaryZeroGuard = true
+                )
+            )
+            if (result != null) {
+                updateDebugParse(result.source, result.mask, result.dataPreview)
+                return result.mask
             }
-            val data = pendingBytes.toByteArray()
-            if (data.isEmpty()) return null
-
-            // 1. 优先解析完整的 V2 协议帧 [0x50, cmd, len_lo, len_hi, ...] (最准确)
-            val v2 = parseV2ButtonsFrame(data)
-            if (v2 != null) {
-                trimPending(data, v2.second)
-                val out = v2.first and 0xFFFF
-                updateDebugParse("v2", out, data)
-                return out
-            }
-
-            // 2. 解析文本命令 km.buttons(x)
-            val text = data.toString(Charsets.ISO_8859_1)
-            val textMatch = Regex("""(?:k[mM]\.|[mM]\.)?buttons\(\s*([0-9a-fbx]+)\s*\)""", RegexOption.IGNORE_CASE)
-                .findAll(text)
-                .lastOrNull()
-            if (textMatch != null) {
-                val mask = parseMaskToken(textMatch.groupValues.getOrNull(1))
-                trimPending(data, textMatch.range.last + 1)
-                val out = mask?.and(0xFFFF)
-                updateDebugParse("text()", out, data)
-                return out
-            }
-            val kvMatch = Regex("""(?:k[mM]\.|[mM]\.)?buttons\s*[:=]\s*([0-9a-fbx]+)""", RegexOption.IGNORE_CASE)
-                .findAll(text)
-                .lastOrNull()
-            if (kvMatch != null) {
-                val mask = parseMaskToken(kvMatch.groupValues.getOrNull(1))
-                trimPending(data, kvMatch.range.last + 1)
-                val out = mask?.and(0xFFFF)
-                updateDebugParse("text:=", out, data)
-                return out
-            }
-
-            // 2.1 兼容固件仅回传单键状态，例如 right(1) / x1:0
-            val eventMask = parsePerButtonEvents(text)
-            if (eventMask != null) {
-                trimPending(data, eventMask.second)
-                val out = eventMask.first and 0xFFFF
-                updateDebugParse("event", out, data)
-                return out
-            }
-
-            // 2.2 兼容 "km.buttons<rawByte>" 风格回包
-            val binaryAfterToken = parseBinaryAfterButtonsToken(data)
-            if (binaryAfterToken != null) {
-                trimPending(data, binaryAfterToken.second)
-                val out = binaryAfterToken.first and 0xFFFF
-                updateDebugParse("token", out, data)
-                return out
-            }
-
-            // 3. 严格解析二进制流 (这是解决乱触发的核心)
-            val binary = parseBinaryButtonsFrameStrict(data)
-            if (binary != null) {
-                trimPending(data, binary.second)
-                val out = binary.first and 0xFFFF
-                updateDebugParse("binary", out, data)
-                return out
-            }
-
-            // 3.1 兼容 HID 风格回包: [buttons, dx, dy, wheel...]
-            val hid = parseHidStyleButtonsReport(data)
-            if (hid != null) {
-                trimPending(data, hid.second)
-                val out = hid.first and 0xFFFF
-                updateDebugParse("hid", out, data)
-                return out
-            }
-
-            // 4. 防积压：最多保留最后的 64 字节，丢弃旧数据防止干扰
-            if (data.size > 64) {
-                trimPending(data, data.size - 64)
-            }
-            updateDebugParse("none", null, data)
+            updateDebugParse("none", null, parserState.pendingBytes.toByteArray())
             return null
-        }
-    }
-
-    private fun parsePerButtonEvents(text: String): Pair<Int, Int>? {
-        var consumed = -1
-        var matched = false
-        buttonAliasRegexes.forEach { (bit, regex) ->
-            regex.findAll(text).forEach { match ->
-                matched = true
-                val pressed = match.groupValues.getOrNull(1) == "1"
-                snapshotMaskCache = if (pressed) {
-                    snapshotMaskCache or bit
-                } else {
-                    snapshotMaskCache and bit.inv()
-                }
-                consumed = maxOf(consumed, match.range.last + 1)
-            }
-        }
-        if (!matched || consumed <= 0) return null
-        return (snapshotMaskCache and 0x1F) to consumed
-    }
-
-    private fun parseBinaryAfterButtonsToken(data: ByteArray): Pair<Int, Int>? {
-        fun parseAfter(token: ByteArray): Pair<Int, Int>? {
-            val tokenIndex = indexOfSubArray(data, token)
-            if (tokenIndex < 0) return null
-            val nextIndex = tokenIndex + token.size
-            if (nextIndex >= data.size) return null
-            val value = data[nextIndex].toInt() and 0xFF
-            if (value > 0x1F) return null
-            return value to (nextIndex + 1)
-        }
-
-        return parseAfter("km.buttons".toByteArray(Charsets.US_ASCII))
-            ?: parseAfter("kM.buttons".toByteArray(Charsets.US_ASCII))
-            ?: parseAfter("m.buttons".toByteArray(Charsets.US_ASCII))
-            ?: parseAfter("M.buttons".toByteArray(Charsets.US_ASCII))
-            ?: parseAfter("buttons".toByteArray(Charsets.US_ASCII))
-    }
-
-    // 替代原来的 parseBinaryButtonsFrame
-    private fun parseBinaryButtonsFrameStrict(data: ByteArray): Pair<Int, Int>? {
-        // 严格模式：只接受非常符合规范的二进制状态流，拒绝被移动命令的 ACK 干扰
-        for (i in 0 until (data.size - 2)) {
-            if ((data[i].toInt() and 0xFF) != 0x02) continue
-
-            val b1 = data[i + 1].toInt() and 0xFF
-            val b2 = data[i + 2].toInt() and 0xFF
-
-            // 鼠标按键最多只有 5 个键，组合起来最大值是 0x1F。
-            // 大于 0x1F 或高位字节非 0，视为移动回包乱码并过滤。
-            if (b2 != 0x00 || b1 !in 0..0x1F) continue
-
-            // 0 态是“松开”信号，需要接收；但要做上下文约束，避免把杂讯 0 误判为松开。
-            if (b1 == 0) {
-                val prev = if (i > 0) (data[i - 1].toInt() and 0xFF) else 0x0A
-                val next = if (i + 3 < data.size) (data[i + 3].toInt() and 0xFF) else 0x0A
-                val prevOk = (i == 0) || prev == 0x0A || prev == 0x0D || prev == 0x3E || prev < 0x20
-                val nextOk = (i + 3 >= data.size) || next == 0x02 || next == 0x0A || next == 0x0D || next == 0x3E || next < 0x20
-                if (!prevOk || !nextOk) continue
-            }
-
-            val mask = b1 and 0x1F
-            val consume = i + 3
-            return mask to consume
-        }
-        return null
-    }
-
-    private fun parseHidStyleButtonsReport(data: ByteArray): Pair<Int, Int>? {
-        if (data.size < 4) return null
-        val start = (data.size - 32).coerceAtLeast(0)
-        for (i in (data.size - 4) downTo start) {
-            val b0 = data[i].toInt() and 0xFF
-            if (b0 !in 0..0x1F) continue
-            val b1 = data[i + 1].toInt() and 0xFF
-            val b2 = data[i + 2].toInt() and 0xFF
-            val b3 = data[i + 3].toInt() and 0xFF
-            val tailPrintable = (b1 in 0x20..0x7E) && (b2 in 0x20..0x7E) && (b3 in 0x20..0x7E)
-            if (tailPrintable) continue
-            val promptEcho = (b1 == 0x3E && b2 == 0x3E) || (b2 == 0x3E && b3 == 0x3E)
-            if (promptEcho) continue
-            val lineBreakEcho = (b0 == 0x0A || b0 == 0x0D || b0 == 0x09) && (b1 in 0x20..0x7E || b2 in 0x20..0x7E || b3 in 0x20..0x7E)
-            if (lineBreakEcho) continue
-            return b0 to (i + 4)
-        }
-        return null
-    }
-
-    private fun indexOfSubArray(haystack: ByteArray, needle: ByteArray): Int {
-        if (needle.isEmpty() || haystack.size < needle.size) return -1
-        val limit = haystack.size - needle.size
-        for (i in 0..limit) {
-            var ok = true
-            for (j in needle.indices) {
-                if (haystack[i + j] != needle[j]) {
-                    ok = false
-                    break
-                }
-            }
-            if (ok) return i
-        }
-        return -1
-    }
-
-    private fun parseMaskToken(rawToken: String?): Int? {
-        val token = rawToken
-            ?.trim()
-            ?.trim(*charArrayOf(',', ';', ')', '(', '"', '\''))
-            ?.lowercase(Locale.US)
-            ?: return null
-        if (token.isBlank()) return null
-        val value = when {
-            token.startsWith("0x") -> token.substring(2).toIntOrNull(16)
-            token.startsWith("0b") -> token.substring(2).toIntOrNull(2)
-            else -> token.toIntOrNull()
-        } ?: return null
-        return value and 0xFFFF
-    }
-
-    private fun parseV2ButtonsFrame(data: ByteArray): Pair<Int, Int>? {
-        var index = 0
-        while (index + 4 <= data.size) {
-            if ((data[index].toInt() and 0xFF) != MAKCU_V2_FRAME_HEAD) {
-                index++
-                continue
-            }
-            val cmd = data[index + 1].toInt() and 0xFF
-            val len = (data[index + 2].toInt() and 0xFF) or ((data[index + 3].toInt() and 0xFF) shl 8)
-            if (len < 0 || len > 1024) {
-                index++
-                continue
-            }
-            val frameEnd = index + 4 + len
-            if (frameEnd > data.size) return null
-            if (cmd == MAKCU_V2_CMD_BUTTONS && len > 0) {
-                val b0 = data[index + 4].toInt() and 0xFF
-                val b1 = if (len > 1) (data[index + 5].toInt() and 0xFF) else 0
-                val looksConfigAck = len >= 2 && b0 in 0..2 && b1 in 1..255
-                if (!looksConfigAck) {
-                    if (len == 1 && b0 <= 0x1F) {
-                        return b0 to frameEnd
-                    }
-                    if (len >= 2) {
-                        val mask16 = (b0 or (b1 shl 8)) and 0xFFFF
-                        // Keep two-byte masks for firmwares that report buttons in high bits.
-                        if ((b1 == 0 && b0 <= 0x1F) || (mask16 != 0 && (b1 == 0 || b0 == 0))) {
-                            return mask16 to frameEnd
-                        }
-                    }
-                }
-            }
-            index = frameEnd
-        }
-        return null
-    }
-
-    private fun trimPending(data: ByteArray, consume: Int) {
-        pendingBytes.reset()
-        if (consume < data.size) {
-            pendingBytes.write(data, consume, data.size - consume)
         }
     }
 
@@ -1695,6 +1848,7 @@ private object MakcuLinkRuntime {
                             status = "MAKCU ${MakcuSerialEngine.lastStatus}${if (MakcuSerialEngine.canReadButtons()) "" else " (无输入端点，按键监控不可用)"}"
                         )
                         var idleReads = 0
+                        var lastMaskUpdateMs = System.currentTimeMillis()
                         while (isActive && MakcuSerialEngine.isConnected()) {
                             val stateSnapshot = _state.value
                             val holding = ((stateSnapshot.rawButtonMask or stateSnapshot.buttonMask) and 0xFFFF) != 0
@@ -1726,10 +1880,26 @@ private object MakcuLinkRuntime {
                                         debugInfo = MakcuSerialEngine.debugSummary()
                                     )
                                 }
+                                if (
+                                    holding &&
+                                    HoldSafetyConfig.enableStuckHoldRecovery &&
+                                    System.currentTimeMillis() - lastMaskUpdateMs >= HoldSafetyConfig.recoveryTimeoutMs
+                                ) {
+                                    lastMaskUpdateMs = System.currentTimeMillis()
+                                    _state.value = _state.value.copy(
+                                        rawButtonMask = 0,
+                                        buttonMask = 0,
+                                        debugInfo = MakcuSerialEngine.debugSummary(),
+                                        status = "安全回退：疑似卡住长按，已清零并重启按键流"
+                                    )
+                                    MakcuSerialEngine.primeButtonsStream()
+                                    idleReads = 0
+                                }
                                 delay(if (holding) 2 else 5)
                                 continue
                             }
                             idleReads = 0
+                            lastMaskUpdateMs = System.currentTimeMillis()
                             val rawMask = sanitizeRawMouseButtonMask(mask)
                             val mappedMask = normalizeMouseButtonMask(rawMask)
                             _state.value = _state.value.copy(
@@ -1772,7 +1942,7 @@ private object MakcuLinkRuntime {
                     connected = true,
                     rawButtonMask = 0,
                     buttonMask = 0,
-                    debugInfo = "",
+                    debugInfo = opened.debugSummary(),
                     status = if (opened.isHandshakeVerified && opened.isWriteReady) {
                         "MAKCU 通道已连接 (if=${opened.dataInterfaceId}, baud=${opened.baudRate}, in=${if (opened.canReadButtons()) "yes" else "no"}) ${opened.outEndpointInfo}"
                     } else if (!opened.isWriteReady) {
@@ -1830,6 +2000,7 @@ private object MakcuLinkRuntime {
                 }
 
                 var idleReads = 0
+                var lastMaskUpdateMs = System.currentTimeMillis()
                 while (isActive) {
                     val stateSnapshot = _state.value
                     val holding = ((stateSnapshot.rawButtonMask or stateSnapshot.buttonMask) and 0xFFFF) != 0
@@ -1850,16 +2021,37 @@ private object MakcuLinkRuntime {
                             opened.sendCommandExact("km.buttons(2,$MAKCU_BUTTON_STREAM_PERIOD_MS)")
                             opened.sendCommandExact("buttons(2,$MAKCU_BUTTON_STREAM_PERIOD_MS)")
                         }
+                        if (idleReads % 40 == 0) {
+                            _state.value = _state.value.copy(debugInfo = opened.debugSummary())
+                        }
+                        if (
+                            holding &&
+                            HoldSafetyConfig.enableStuckHoldRecovery &&
+                            System.currentTimeMillis() - lastMaskUpdateMs >= HoldSafetyConfig.recoveryTimeoutMs
+                        ) {
+                            lastMaskUpdateMs = System.currentTimeMillis()
+                            _state.value = _state.value.copy(
+                                rawButtonMask = 0,
+                                buttonMask = 0,
+                                debugInfo = opened.debugSummary(),
+                                status = "安全回退：疑似卡住长按，已清零并重启按键流"
+                            )
+                            opened.startButtonsStreamV2(mode = 2, periodMs = MAKCU_BUTTON_STREAM_PERIOD_MS)
+                            opened.sendCommandExact("km.buttons(2,$MAKCU_BUTTON_STREAM_PERIOD_MS)")
+                            opened.sendCommandExact("buttons(2,$MAKCU_BUTTON_STREAM_PERIOD_MS)")
+                            idleReads = 0
+                        }
                         delay(if (holding) 2 else 5)
                         continue
                     }
                     idleReads = 0
+                    lastMaskUpdateMs = System.currentTimeMillis()
                     val rawMask = sanitizeRawMouseButtonMask(mask)
                     val mappedMask = normalizeMouseButtonMask(rawMask)
                     _state.value = _state.value.copy(
                         rawButtonMask = rawMask,
                         buttonMask = mappedMask,
-                        debugInfo = ""
+                        debugInfo = opened.debugSummary()
                     )
                     delay(2)
                 }
@@ -1915,10 +2107,16 @@ private object MakcuLinkRuntime {
                     _state.value = _state.value.copy(
                         rawButtonMask = rawMask,
                         buttonMask = normalizeMouseButtonMask(rawMask),
-                        debugInfo = if (MakcuSerialEngine.isConnected()) MakcuSerialEngine.debugSummary() else _state.value.debugInfo
+                        debugInfo = when {
+                            MakcuSerialEngine.isConnected() -> MakcuSerialEngine.debugSummary()
+                            sessionRef.get() != null -> sessionRef.get()?.debugSummary().orEmpty()
+                            else -> _state.value.debugInfo
+                        }
                     )
                 } else if (MakcuSerialEngine.isConnected()) {
                     _state.value = _state.value.copy(debugInfo = MakcuSerialEngine.debugSummary())
+                } else if (sessionRef.get() != null) {
+                    _state.value = _state.value.copy(debugInfo = sessionRef.get()?.debugSummary().orEmpty())
                 }
             } finally {
                 snapshotQueryLock.unlock()
@@ -1966,6 +2164,30 @@ private object AimPdConfig {
 private object OverlayRenderConfig {
     @Volatile var showLabelTag: Boolean = true
     @Volatile var showConfidencePercent: Boolean = true
+}
+
+private object DebugRenderConfig {
+    @Volatile var showPdOverlay: Boolean = true
+    @Volatile var showDeviceDebug: Boolean = false
+}
+
+private object HoldSafetyConfig {
+    @Volatile var enableStuckHoldRecovery: Boolean = false
+    @Volatile var recoveryTimeoutMs: Long = 3_500L
+}
+
+private object PdRuntimeDiagnostics {
+    private val snapshotRef = AtomicReference(PdRuntimeSnapshot())
+
+    fun update(snapshot: PdRuntimeSnapshot) {
+        snapshotRef.set(snapshot)
+    }
+
+    fun clear(autoFireState: String = "idle") {
+        snapshotRef.set(PdRuntimeSnapshot(autoFireState = autoFireState))
+    }
+
+    fun snapshot(): PdRuntimeSnapshot = snapshotRef.get()
 }
 
 private class PdController(var kp: Float, var kd: Float) {
@@ -2476,6 +2698,16 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         strokeWidth = 2.2f
         isAntiAlias = true
     }
+    private val diagBgPaint = Paint().apply {
+        color = android.graphics.Color.argb(185, 18, 18, 18)
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    private val diagTextPaint = Paint().apply {
+        color = android.graphics.Color.WHITE
+        textSize = 20f
+        isAntiAlias = true
+    }
 
     init { holder.addCallback(this) }
 
@@ -2598,29 +2830,74 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                                         } else {
                                             smoothedOutY * smoothY + pdOutY * (1f - smoothY)
                                         }
-                                        val moveX = smoothedOutX.roundToInt().coerceIn(-AimPdConfig.xMaxOut, AimPdConfig.xMaxOut)
-                                        val moveY = smoothedOutY.roundToInt().coerceIn(-AimPdConfig.yMaxOut, AimPdConfig.yMaxOut)
-                                        if (abs(moveX) + abs(moveY) > 0) {
+                                        val rawMoveX = smoothedOutX.roundToInt()
+                                        val rawMoveY = smoothedOutY.roundToInt()
+                                        val moveX = rawMoveX.coerceIn(-AimPdConfig.xMaxOut, AimPdConfig.xMaxOut)
+                                        val moveY = rawMoveY.coerceIn(-AimPdConfig.yMaxOut, AimPdConfig.yMaxOut)
+                                        if (aimCfg.autoAimEnabled && abs(moveX) + abs(moveY) > 0) {
                                             RuntimeBridge.sendMove(moveX, moveY)
                                         }
+                                        val fireDx = targetX - centerX
+                                        val fireDy = targetY - centerY
+                                        val inFireRange = fireDx * fireDx + fireDy * fireDy <= aimCfg.fireRangePx * aimCfg.fireRangePx
+                                        RuntimeBridge.updateAutoFire(
+                                            enabled = aimCfg.autoFireEnabled && inFireRange,
+                                            cfg = aimCfg
+                                        )
+                                        val snapshot = PdRuntimeSnapshot(
+                                            active = true,
+                                            targetId = if (best.trackId > 0) best.trackId else best.label,
+                                            errX = errX,
+                                            errY = errY,
+                                            pdOutX = pdOutX,
+                                            pdOutY = pdOutY,
+                                            smoothOutX = smoothedOutX,
+                                            smoothOutY = smoothedOutY,
+                                            moveX = moveX,
+                                            moveY = moveY,
+                                            clampX = rawMoveX != moveX,
+                                            clampY = rawMoveY != moveY,
+                                            inFireRange = inFireRange,
+                                            autoFireState = RuntimeBridge.autoFireState()
+                                        )
+                                        PdRuntimeDiagnostics.update(snapshot)
+                                        if (DebugRenderConfig.showPdOverlay) {
+                                            drawDiagnosticsOverlay(canvas, snapshot)
+                                        }
                                     } else {
+                                        RuntimeBridge.updateAutoFire(enabled = false, cfg = aimCfg)
                                         pidX.reset()
                                         pidY.reset()
                                         smoothedOutX = 0f
                                         smoothedOutY = 0f
+                                        val snapshot = PdRuntimeSnapshot(autoFireState = RuntimeBridge.autoFireState())
+                                        PdRuntimeDiagnostics.update(snapshot)
+                                        if (DebugRenderConfig.showPdOverlay) {
+                                            drawDiagnosticsOverlay(canvas, snapshot)
+                                        }
                                     }
                                 } else {
+                                    RuntimeBridge.updateAutoFire(enabled = false, cfg = aimCfg)
                                     pidX.reset()
                                     pidY.reset()
                                     smoothedOutX = 0f
                                     smoothedOutY = 0f
+                                    val snapshot = PdRuntimeSnapshot(autoFireState = RuntimeBridge.autoFireState())
+                                    PdRuntimeDiagnostics.update(snapshot)
+                                    if (DebugRenderConfig.showPdOverlay) {
+                                        drawDiagnosticsOverlay(canvas, snapshot)
+                                    }
                                 }
 
                                 bmp.recycle()
                             } else {
+                                RuntimeBridge.updateAutoFire(enabled = false, cfg = null)
+                                PdRuntimeDiagnostics.clear(RuntimeBridge.autoFireState())
                                 canvas.drawText("等待画面...", 24f, 64f, textPaint)
                             }
                         } else {
+                            RuntimeBridge.updateAutoFire(enabled = false, cfg = null)
+                            PdRuntimeDiagnostics.clear(RuntimeBridge.autoFireState())
                             canvas.drawText("等待数据...", 24f, 64f, textPaint)
                         }
                     } finally {
@@ -2637,10 +2914,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         job?.cancel()
         job = null
+        RuntimeBridge.updateAutoFire(enabled = false, cfg = null)
         pidX.reset()
         pidY.reset()
         smoothedOutX = 0f
         smoothedOutY = 0f
+        PdRuntimeDiagnostics.clear(RuntimeBridge.autoFireState())
         scope.cancel()
     }
 
@@ -2704,6 +2983,29 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val baseline = tagRect.top + tagHeight * 0.72f
         canvas.drawText(text, tagRect.left + paddingH, baseline, tagTextPaint)
     }
+
+    private fun drawDiagnosticsOverlay(canvas: android.graphics.Canvas, snapshot: PdRuntimeSnapshot) {
+        val lines = listOf(
+            "PD ${if (snapshot.active) "active" else "idle"} target=${if (snapshot.targetId >= 0) snapshot.targetId else "--"} fire=${snapshot.autoFireState}",
+            "err x=${"%.1f".format(snapshot.errX)} y=${"%.1f".format(snapshot.errY)}",
+            "pd  x=${"%.2f".format(snapshot.pdOutX)} y=${"%.2f".format(snapshot.pdOutY)}",
+            "out x=${snapshot.moveX} y=${snapshot.moveY} clamp=${if (snapshot.clampX) "X" else "-"}${if (snapshot.clampY) "Y" else "-"} inRange=${if (snapshot.inFireRange) "yes" else "no"}"
+        )
+        val padding = 12f
+        val lineHeight = 24f
+        val textWidth = lines.maxOfOrNull { diagTextPaint.measureText(it) } ?: 0f
+        val rect = RectF(
+            12f,
+            12f,
+            12f + textWidth + padding * 2f,
+            12f + padding * 2f + lineHeight * lines.size
+        )
+        canvas.drawRoundRect(rect, 8f, 8f, diagBgPaint)
+        lines.forEachIndexed { index, line ->
+            val baseline = rect.top + padding + lineHeight * (index + 0.8f)
+            canvas.drawText(line, rect.left + padding, baseline, diagTextPaint)
+        }
+    }
 }
 
 @Composable
@@ -2744,6 +3046,9 @@ fun MainApp() {
     var ySmoothInput by rememberSaveable { mutableStateOf("0.2000") }
     var yDeadzoneInput by rememberSaveable { mutableStateOf("0") }
     var yMaxOutInput by rememberSaveable { mutableStateOf("50") }
+    var showPdOverlay by rememberSaveable { mutableStateOf(true) }
+    var showDeviceDebug by rememberSaveable { mutableStateOf(false) }
+    var enableStuckHoldRecovery by rememberSaveable { mutableStateOf(false) }
 
     val modelOptions = remember { mutableStateListOf<ModelEntry>() }
     val hotkeys = remember {
@@ -2830,6 +3135,9 @@ fun MainApp() {
         put("ySmooth", parseFloatInputValue(ySmoothInput, 0.2f, 0f, 0.98f).toDouble())
         put("yDeadzone", parseIntInputValue(yDeadzoneInput, 0, 0, 200))
         put("yMaxOut", parseIntInputValue(yMaxOutInput, 50, 1, 800))
+        put("showPdOverlay", showPdOverlay)
+        put("showDeviceDebug", showDeviceDebug)
+        put("enableStuckHoldRecovery", enableStuckHoldRecovery)
         put("hotkeys", JSONArray().apply { hotkeys.forEach { put(hotkeyToJson(it)) } })
     }
 
@@ -2865,6 +3173,9 @@ fun MainApp() {
         ySmoothInput = formatFloatInput(root.optDouble("ySmooth", 0.2).toFloat().coerceIn(0f, 0.98f), 4)
         yDeadzoneInput = root.optInt("yDeadzone", 0).coerceIn(0, 200).toString()
         yMaxOutInput = root.optInt("yMaxOut", 50).coerceIn(1, 800).toString()
+        showPdOverlay = root.optBoolean("showPdOverlay", true)
+        showDeviceDebug = root.optBoolean("showDeviceDebug", false)
+        enableStuckHoldRecovery = root.optBoolean("enableStuckHoldRecovery", false)
 
         val parsed = parseHotkeys(root.optJSONArray("hotkeys"))
         hotkeys.clear()
@@ -2987,6 +3298,11 @@ fun MainApp() {
         OverlayRenderConfig.showLabelTag = showLabelTag
         OverlayRenderConfig.showConfidencePercent = showConfidencePercent
     }
+    LaunchedEffect(showPdOverlay, showDeviceDebug, enableStuckHoldRecovery) {
+        DebugRenderConfig.showPdOverlay = showPdOverlay
+        DebugRenderConfig.showDeviceDebug = showDeviceDebug
+        HoldSafetyConfig.enableStuckHoldRecovery = enableStuckHoldRecovery
+    }
     LaunchedEffect(
         trackingEnabled,
         trackingConfirmThreshold,
@@ -3077,6 +3393,9 @@ fun MainApp() {
                         ySmooth = ySmoothInput,
                         yDeadzone = yDeadzoneInput,
                         yMaxOut = yMaxOutInput,
+                        showPdOverlay = showPdOverlay,
+                        showDeviceDebug = showDeviceDebug,
+                        enableStuckHoldRecovery = enableStuckHoldRecovery,
                         onHotkeyChanged = { index, item -> hotkeys[index] = item },
                         onAimRangeEnabledChange = { aimRangeEnabled = it },
                         onAimRangePercentChange = { aimRangePercent = it.coerceIn(0f, 100f) },
@@ -3089,7 +3408,10 @@ fun MainApp() {
                         onYKdChange = { yKdInput = filterDecimalInput(it) },
                         onYSmoothChange = { ySmoothInput = filterDecimalInput(it) },
                         onYDeadzoneChange = { yDeadzoneInput = filterIntInput(it) },
-                        onYMaxOutChange = { yMaxOutInput = filterIntInput(it) }
+                        onYMaxOutChange = { yMaxOutInput = filterIntInput(it) },
+                        onShowPdOverlayChange = { showPdOverlay = it },
+                        onShowDeviceDebugChange = { showDeviceDebug = it },
+                        onEnableStuckHoldRecoveryChange = { enableStuckHoldRecovery = it }
                     )
                     AppTab.Function -> FunctionScreen(
                         trackingEnabled = trackingEnabled,
@@ -3477,6 +3799,9 @@ fun InputControlScreen(
     ySmooth: String,
     yDeadzone: String,
     yMaxOut: String,
+    showPdOverlay: Boolean,
+    showDeviceDebug: Boolean,
+    enableStuckHoldRecovery: Boolean,
     onHotkeyChanged: (Int, HotkeyConfig) -> Unit,
     onAimRangeEnabledChange: (Boolean) -> Unit,
     onAimRangePercentChange: (Float) -> Unit,
@@ -3489,7 +3814,10 @@ fun InputControlScreen(
     onYKdChange: (String) -> Unit,
     onYSmoothChange: (String) -> Unit,
     onYDeadzoneChange: (String) -> Unit,
-    onYMaxOutChange: (String) -> Unit
+    onYMaxOutChange: (String) -> Unit,
+    onShowPdOverlayChange: (Boolean) -> Unit,
+    onShowDeviceDebugChange: (Boolean) -> Unit,
+    onEnableStuckHoldRecoveryChange: (Boolean) -> Unit
 ) {
     val tabs = listOf("设备连接", "热键1", "热键2", "热键3", "控制参数")
     val pagerState = rememberPagerState(pageCount = { tabs.size })
@@ -3537,7 +3865,12 @@ fun InputControlScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 when (page) {
-                    0 -> DeviceConnectTab()
+                    0 -> DeviceConnectTab(
+                        showDeviceDebug = showDeviceDebug,
+                        enableStuckHoldRecovery = enableStuckHoldRecovery,
+                        onShowDeviceDebugChange = onShowDeviceDebugChange,
+                        onEnableStuckHoldRecoveryChange = onEnableStuckHoldRecoveryChange
+                    )
                     1, 2, 3 -> {
                         val idx = page - 1
                         val cfg = hotkeys.getOrElse(idx) { HotkeyConfig("热键${idx + 1}") }
@@ -3558,6 +3891,9 @@ fun InputControlScreen(
                         ySmooth = ySmooth,
                         yDeadzone = yDeadzone,
                         yMaxOut = yMaxOut,
+                        showPdOverlay = showPdOverlay,
+                        showDeviceDebug = showDeviceDebug,
+                        enableStuckHoldRecovery = enableStuckHoldRecovery,
                         onAimRangeEnabledChange = onAimRangeEnabledChange,
                         onAimRangePercentChange = onAimRangePercentChange,
                         onXKpChange = onXKpChange,
@@ -3569,7 +3905,10 @@ fun InputControlScreen(
                         onYKdChange = onYKdChange,
                         onYSmoothChange = onYSmoothChange,
                         onYDeadzoneChange = onYDeadzoneChange,
-                        onYMaxOutChange = onYMaxOutChange
+                        onYMaxOutChange = onYMaxOutChange,
+                        onShowPdOverlayChange = onShowPdOverlayChange,
+                        onShowDeviceDebugChange = onShowDeviceDebugChange,
+                        onEnableStuckHoldRecoveryChange = onEnableStuckHoldRecoveryChange
                     )
                 }
             }
@@ -3578,7 +3917,12 @@ fun InputControlScreen(
 }
 
 @Composable
-private fun DeviceConnectTab() {
+private fun DeviceConnectTab(
+    showDeviceDebug: Boolean,
+    enableStuckHoldRecovery: Boolean,
+    onShowDeviceDebugChange: (Boolean) -> Unit,
+    onEnableStuckHoldRecoveryChange: (Boolean) -> Unit
+) {
     val context = LocalContext.current
     val usbManager = remember(context) { context.getSystemService(Context.USB_SERVICE) as? UsbManager }
     val linkState by MakcuLinkRuntime.state.collectAsState()
@@ -3938,7 +4282,45 @@ private fun DeviceConnectTab() {
                     fontSize = 11.sp,
                     color = Color(0xFF616161)
                 )
-                if (linkState.debugInfo.isNotBlank()) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFF5F5F5),
+                        border = BorderStroke(1.dp, Color(0xFFDDDDDD))
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("调试模式", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
+                                Text("显示解析来源和最近 RX 摘要", fontSize = 10.sp, color = Color(0xFF757575))
+                            }
+                            InputGraySwitch(checked = showDeviceDebug, onCheckedChange = onShowDeviceDebugChange)
+                        }
+                    }
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFF5F5F5),
+                        border = BorderStroke(1.dp, Color(0xFFDDDDDD))
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("安全回退", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
+                                Text("长按卡住时尝试自动清零", fontSize = 10.sp, color = Color(0xFF757575))
+                            }
+                            InputGraySwitch(checked = enableStuckHoldRecovery, onCheckedChange = onEnableStuckHoldRecoveryChange)
+                        }
+                    }
+                }
+                if (showDeviceDebug && linkState.debugInfo.isNotBlank()) {
                     Text(
                         text = "解析调试: ${linkState.debugInfo}",
                         fontSize = 10.sp,
@@ -4396,6 +4778,9 @@ private fun ControlParamTab(
     ySmooth: String,
     yDeadzone: String,
     yMaxOut: String,
+    showPdOverlay: Boolean,
+    showDeviceDebug: Boolean,
+    enableStuckHoldRecovery: Boolean,
     onXKpChange: (String) -> Unit,
     onXKdChange: (String) -> Unit,
     onXSmoothChange: (String) -> Unit,
@@ -4405,9 +4790,20 @@ private fun ControlParamTab(
     onYKdChange: (String) -> Unit,
     onYSmoothChange: (String) -> Unit,
     onYDeadzoneChange: (String) -> Unit,
-    onYMaxOutChange: (String) -> Unit
+    onYMaxOutChange: (String) -> Unit,
+    onShowPdOverlayChange: (Boolean) -> Unit,
+    onShowDeviceDebugChange: (Boolean) -> Unit,
+    onEnableStuckHoldRecoveryChange: (Boolean) -> Unit
 ) {
     val panelColor = Color(0xFFEFEFEF)
+    var diagnostics by remember { mutableStateOf(PdRuntimeDiagnostics.snapshot()) }
+
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            diagnostics = PdRuntimeDiagnostics.snapshot()
+            delay(120)
+        }
+    }
 
     Text("PD 控制参数", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF4A4A4A))
     Text("参数需要由小到大慢慢微调，建议先只调整 Kp 和 Kd", color = Color(0xFF747474), fontSize = 12.sp)
@@ -4441,6 +4837,66 @@ private fun ControlParamTab(
         onDeadzoneChange = onYDeadzoneChange,
         onMaxOutChange = onYMaxOutChange
     )
+
+    Card(colors = CardDefaults.cardColors(containerColor = panelColor), shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("实时诊断与安全", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3F3F3F))
+            Text(
+                "overlay 用于在画面上直接看误差、PD 输出和自动射击状态；调试模式用于设备解析排查。",
+                color = Color(0xFF777777),
+                fontSize = 12.sp
+            )
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("PD 诊断 Overlay", fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
+                    Text("在预览画面叠加 err/pd/move/fire 状态", color = Color(0xFF777777), fontSize = 12.sp)
+                }
+                InputGraySwitch(checked = showPdOverlay, onCheckedChange = onShowPdOverlayChange)
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("设备调试模式", fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
+                    Text("显示 parser 来源和最近 RX 摘要", color = Color(0xFF777777), fontSize = 12.sp)
+                }
+                InputGraySwitch(checked = showDeviceDebug, onCheckedChange = onShowDeviceDebugChange)
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("卡住长按安全回退", fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
+                    Text("持续无新输入时尝试清零并重启按键流", color = Color(0xFF777777), fontSize = 12.sp)
+                }
+                InputGraySwitch(checked = enableStuckHoldRecovery, onCheckedChange = onEnableStuckHoldRecoveryChange)
+            }
+
+            HorizontalDivider(color = Color(0xFFDADADA), thickness = 1.dp)
+
+            val targetLabel = if (diagnostics.targetId >= 0) diagnostics.targetId.toString() else "--"
+            val clampLabel = buildString {
+                append(if (diagnostics.clampX) "X" else "-")
+                append("/")
+                append(if (diagnostics.clampY) "Y" else "-")
+            }
+            Text("运行时快照", fontWeight = FontWeight.SemiBold, color = Color(0xFF505050))
+            Text(
+                "target=$targetLabel  active=${if (diagnostics.active) "yes" else "no"}  fire=${diagnostics.autoFireState}  inRange=${if (diagnostics.inFireRange) "yes" else "no"}",
+                fontSize = 12.sp,
+                color = Color(0xFF666666)
+            )
+            Text(
+                "errX=${"%.1f".format(diagnostics.errX)}  errY=${"%.1f".format(diagnostics.errY)}  pdX=${"%.2f".format(diagnostics.pdOutX)}  pdY=${"%.2f".format(diagnostics.pdOutY)}",
+                fontSize = 12.sp,
+                color = Color(0xFF666666)
+            )
+            Text(
+                "smoothX=${"%.2f".format(diagnostics.smoothOutX)}  smoothY=${"%.2f".format(diagnostics.smoothOutY)}  moveX=${diagnostics.moveX}  moveY=${diagnostics.moveY}  clamp=$clampLabel",
+                fontSize = 12.sp,
+                color = Color(0xFF666666)
+            )
+        }
+    }
 
     Card(colors = CardDefaults.cardColors(containerColor = panelColor), shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -4799,15 +5255,11 @@ private class MakcuUsbSession(
 ) {
     private val writeLock = Mutex()
     private val parseLock = Any()
-    private val pendingBytes = ByteArrayOutputStream()
-    private var snapshotMaskCache: Int = 0
-    private val buttonAliasRegexes: List<Pair<Int, Regex>> = listOf(
-        0x01 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:left|lbutton)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE),
-        0x02 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:right|rbutton)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE),
-        0x04 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:middle|mbutton)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE),
-        0x08 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:side1|x1|xbutton1)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE),
-        0x10 to Regex("""(?:km\.|kM\.|m\.|M\.)?(?:side2|x2|xbutton2)\s*[:=\(]\s*([01])\s*\)?""", RegexOption.IGNORE_CASE)
-    )
+    private val parserState = MakcuButtonsParseState()
+    @Volatile private var debugLastHex: String = "--"
+    @Volatile private var debugLastParser: String = "init"
+    @Volatile private var debugLastMask: Int = -1
+    @Volatile private var debugLastCount: Int = 0
 
     suspend fun sendCommand(rawCommand: String): UsbSendResult {
         val commands = buildMakcuCommandVariants(rawCommand).take(6)
@@ -4870,6 +5322,60 @@ private class MakcuUsbSession(
             }
             UsbSendResult(success = false, message = "burst写入失败($lastError) ${usbEndpointSummary(outEndpoint)}")
         }
+    }
+
+    fun debugSummary(): String {
+        val maskText = if (debugLastMask >= 0) {
+            "0x${(debugLastMask and 0xFFFF).toString(16).uppercase(Locale.US)}"
+        } else {
+            "--"
+        }
+        return "USB c=$debugLastCount src=$debugLastParser m=$maskText rx=$debugLastHex"
+    }
+
+    private fun updateDebugRx(buffer: ByteArray, count: Int) {
+        debugLastCount = count.coerceAtLeast(0)
+        if (count > 0) {
+            debugLastHex = hexPreview(buffer, count)
+        }
+    }
+
+    private fun updateDebugParse(source: String, mask: Int?, data: ByteArray) {
+        debugLastParser = source
+        debugLastMask = mask ?: -1
+        debugLastHex = hexPreview(data, data.size)
+    }
+
+    private fun hexPreview(buffer: ByteArray, count: Int, maxBytes: Int = 24): String {
+        if (count <= 0) return "--"
+        val end = count.coerceAtMost(buffer.size)
+        val start = (end - maxBytes).coerceAtLeast(0)
+        val sb = StringBuilder()
+        for (i in start until end) {
+            if (sb.isNotEmpty()) sb.append(' ')
+            val v = buffer[i].toInt() and 0xFF
+            if (v < 0x10) sb.append('0')
+            sb.append(v.toString(16).uppercase(Locale.US))
+        }
+        return sb.toString()
+    }
+
+    suspend fun sendMouseButton(buttonMask: Int, pressed: Boolean): UsbSendResult {
+        val aliases = when (buttonMask and 0x1F) {
+            0x01 -> listOf("left", "lbutton")
+            0x02 -> listOf("right", "rbutton")
+            0x04 -> listOf("middle", "mbutton")
+            0x08 -> listOf("side1", "x1", "xbutton1")
+            0x10 -> listOf("side2", "x2", "xbutton2")
+            else -> emptyList()
+        }
+        if (aliases.isEmpty()) return UsbSendResult(false, "不支持的按键")
+        val value = if (pressed) 1 else 0
+        aliases.forEach { alias ->
+            val result = sendCommand("$alias($value)")
+            if (result.success) return result
+        }
+        return UsbSendResult(false, "按键写入失败")
     }
 
     suspend fun sendV2Command(
@@ -4995,6 +5501,16 @@ private class MakcuUsbSession(
         return writeLock.withLock {
             val readBuffer = ByteArray(256)
             val count = usbTransferIn(connection, endpoint, readBuffer, timeoutMs)
+            synchronized(parseLock) {
+                if (count > 0) {
+                    updateDebugRx(readBuffer, count)
+                } else {
+                    debugLastCount = 0
+                    if (debugLastParser == "init" || debugLastParser == "none") {
+                        debugLastParser = "timeout"
+                    }
+                }
+            }
             if (count <= 0) return@withLock parseButtonsMaskFallback()
             parseButtonsMask(readBuffer, count) ?: parseButtonsMaskFallback()
         }
@@ -5013,130 +5529,22 @@ private class MakcuUsbSession(
 
     private fun parseButtonsMask(buffer: ByteArray, count: Int): Int? {
         synchronized(parseLock) {
-            if (count > 0) {
-                pendingBytes.write(buffer, 0, count)
+            val result = MakcuButtonsParser.parse(
+                state = parserState,
+                buffer = buffer,
+                count = count,
+                options = MakcuButtonsParserOptions(
+                    allowBareButtonsToken = false,
+                    strictBinaryZeroGuard = false
+                )
+            )
+            if (result != null) {
+                updateDebugParse(result.source, result.mask, result.dataPreview)
+                return result.mask
             }
-            val data = pendingBytes.toByteArray()
-            if (data.isEmpty()) return null
-
-            // V2 frame: [0x50][cmd][len_lo][len_hi][payload...]
-            val v2 = parseV2ButtonsFrame(data)
-            if (v2 != null) {
-                trimPending(data, v2.second)
-                return v2.first and 0xFFFF
-            }
-
-            val text = data.toString(Charsets.ISO_8859_1)
-            val textMatch = Regex("""(?:k[mM]\.|[mM]\.)?buttons\(\s*([0-9a-fbx]+)\s*\)""", RegexOption.IGNORE_CASE)
-                .findAll(text)
-                .lastOrNull()
-            if (textMatch != null) {
-                val mask = parseMaskToken(textMatch.groupValues.getOrNull(1))
-                trimPending(data, textMatch.range.last + 1)
-                return mask?.and(0xFFFF)
-            }
-            val kvMatch = Regex("""(?:k[mM]\.|[mM]\.)?buttons\s*[:=]\s*([0-9a-fbx]+)""", RegexOption.IGNORE_CASE)
-                .findAll(text)
-                .lastOrNull()
-            if (kvMatch != null) {
-                val mask = parseMaskToken(kvMatch.groupValues.getOrNull(1))
-                trimPending(data, kvMatch.range.last + 1)
-                return mask?.and(0xFFFF)
-            }
-
-            val eventMask = parsePerButtonEvents(text)
-            if (eventMask != null) {
-                trimPending(data, eventMask.second)
-                return eventMask.first and 0xFFFF
-            }
-
-            fun parseBinaryAfterToken(token: ByteArray): Pair<Int, Int>? {
-                val tokenIndex = indexOfSubArray(data, token)
-                if (tokenIndex < 0) return null
-                val nextIndex = tokenIndex + token.size
-                if (nextIndex >= data.size) return null
-                val value = data[nextIndex].toInt() and 0xFF
-                if (value > 0x1F) return null
-                return value to (nextIndex + 1)
-            }
-
-            val tokenA = "km.buttons".toByteArray(Charsets.US_ASCII)
-            val tokenB = "kM.buttons".toByteArray(Charsets.US_ASCII)
-            val tokenC = "m.buttons".toByteArray(Charsets.US_ASCII)
-            val tokenD = "M.buttons".toByteArray(Charsets.US_ASCII)
-            val binaryMask = parseBinaryAfterToken(tokenA)
-                ?: parseBinaryAfterToken(tokenB)
-                ?: parseBinaryAfterToken(tokenC)
-                ?: parseBinaryAfterToken(tokenD)
-            if (binaryMask != null) {
-                trimPending(data, binaryMask.second)
-                return binaryMask.first and 0xFFFF
-            }
-
-            // Binary stream fallback: [0x02][mask_lo][mask_hi]
-            for (i in 0 until (data.size - 2)) {
-                if ((data[i].toInt() and 0xFF) != 0x02) continue
-                val prev = if (i > 0) (data[i - 1].toInt() and 0xFF) else -1
-                val prevLooksDelimiter = (i == 0) || prev == 0x0A || prev == 0x0D || prev == 0x3E || prev < 0x20
-                if (!prevLooksDelimiter) continue
-                val lo = data[i + 1].toInt() and 0xFF
-                val hi = data[i + 2].toInt() and 0xFF
-                if (lo !in 0..0x1F || hi != 0) continue
-                val mask = lo and 0x1F
-                trimPending(data, i + 3)
-                return mask
-            }
-
-            val hid = parseHidStyleButtonsReport(data)
-            if (hid != null) {
-                trimPending(data, hid.second)
-                return hid.first and 0xFFFF
-            }
-
-            if (data.size > 64) {
-                trimPending(data, data.size - 64)
-            }
+            updateDebugParse("none", null, parserState.pendingBytes.toByteArray())
             return null
         }
-    }
-
-    private fun parsePerButtonEvents(text: String): Pair<Int, Int>? {
-        var consumed = -1
-        var matched = false
-        buttonAliasRegexes.forEach { (bit, regex) ->
-            regex.findAll(text).forEach { match ->
-                matched = true
-                val pressed = match.groupValues.getOrNull(1) == "1"
-                snapshotMaskCache = if (pressed) {
-                    snapshotMaskCache or bit
-                } else {
-                    snapshotMaskCache and bit.inv()
-                }
-                consumed = maxOf(consumed, match.range.last + 1)
-            }
-        }
-        if (!matched || consumed <= 0) return null
-        return (snapshotMaskCache and 0x1F) to consumed
-    }
-
-    private fun parseHidStyleButtonsReport(data: ByteArray): Pair<Int, Int>? {
-        if (data.size < 4) return null
-        val start = (data.size - 32).coerceAtLeast(0)
-        for (i in (data.size - 4) downTo start) {
-            val b0 = data[i].toInt() and 0xFF
-            if (b0 !in 0..0x1F) continue
-            val b1 = data[i + 1].toInt() and 0xFF
-            val b2 = data[i + 2].toInt() and 0xFF
-            val b3 = data[i + 3].toInt() and 0xFF
-            val tailPrintable = (b1 in 0x20..0x7E) && (b2 in 0x20..0x7E) && (b3 in 0x20..0x7E)
-            if (tailPrintable) continue
-            val promptEcho = (b1 == 0x3E && b2 == 0x3E) || (b2 == 0x3E && b3 == 0x3E)
-            if (promptEcho) continue
-            val lineBreakEcho = (b0 == 0x0A || b0 == 0x0D || b0 == 0x09) && (b1 in 0x20..0x7E || b2 in 0x20..0x7E || b3 in 0x20..0x7E)
-            if (lineBreakEcho) continue
-            return b0 to (i + 4)
-        }
-        return null
     }
 
     private fun parseButtonsMaskFallback(): Int? {
@@ -5145,64 +5553,13 @@ private class MakcuUsbSession(
         }
     }
 
-    private fun parseMaskToken(rawToken: String?): Int? {
-        val token = rawToken
-            ?.trim()
-            ?.trim(*charArrayOf(',', ';', ')', '(', '"', '\''))
-            ?.lowercase(Locale.US)
-            ?: return null
-        if (token.isBlank()) return null
-        val value = when {
-            token.startsWith("0x") -> token.substring(2).toIntOrNull(16)
-            token.startsWith("0b") -> token.substring(2).toIntOrNull(2)
-            else -> token.toIntOrNull()
-        } ?: return null
-        return value and 0xFFFF
-    }
-
-    private fun parseV2ButtonsFrame(data: ByteArray): Pair<Int, Int>? {
-        var index = 0
-        while (index + 4 <= data.size) {
-            if ((data[index].toInt() and 0xFF) != MAKCU_V2_FRAME_HEAD) {
-                index++
-                continue
-            }
-            val cmd = data[index + 1].toInt() and 0xFF
-            val len = (data[index + 2].toInt() and 0xFF) or ((data[index + 3].toInt() and 0xFF) shl 8)
-            if (len < 0 || len > 1024) {
-                index++
-                continue
-            }
-            val frameEnd = index + 4 + len
-            if (frameEnd > data.size) return null
-            if (cmd == MAKCU_V2_CMD_BUTTONS && len > 0) {
-                val b0 = data[index + 4].toInt() and 0xFF
-                val b1 = if (len > 1) (data[index + 5].toInt() and 0xFF) else 0
-                val looksConfigAck = len >= 2 && b0 in 0..2 && b1 in 1..255
-                if (!looksConfigAck) {
-                    if (len == 1 && b0 <= 0x1F) {
-                        return b0 to frameEnd
-                    }
-                    if (len >= 2) {
-                        val mask16 = (b0 or (b1 shl 8)) and 0xFFFF
-                        if ((b1 == 0 && b0 <= 0x1F) || (mask16 != 0 && (b1 == 0 || b0 == 0))) {
-                            return mask16 to frameEnd
-                        }
-                    }
-                }
-            }
-            index = frameEnd
-        }
-        return null
-    }
-
     private fun readNextV2FrameLocked(timeoutMs: Int): Pair<Int, ByteArray>? {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             synchronized(parseLock) {
-                val ready = parseAnyV2Frame(pendingBytes.toByteArray())
+                val ready = parseAnyV2Frame(parserState.pendingBytes.toByteArray())
                 if (ready != null) {
-                    trimPending(pendingBytes.toByteArray(), ready.third)
+                    trimPending(parserState.pendingBytes.toByteArray(), ready.third)
                     return ready.first to ready.second
                 }
             }
@@ -5211,7 +5568,8 @@ private class MakcuUsbSession(
             val read = usbTransferIn(connection, endpoint, buffer, 40)
             if (read > 0) {
                 synchronized(parseLock) {
-                    pendingBytes.write(buffer, 0, read)
+                    parserState.pendingBytes.write(buffer, 0, read)
+                    updateDebugRx(buffer, read)
                 }
             }
         }
@@ -5240,9 +5598,9 @@ private class MakcuUsbSession(
     }
 
     private fun trimPending(data: ByteArray, consume: Int) {
-        pendingBytes.reset()
+        parserState.pendingBytes.reset()
         if (consume < data.size) {
-            pendingBytes.write(data, consume, data.size - consume)
+            parserState.pendingBytes.write(data, consume, data.size - consume)
         }
     }
 }
@@ -6180,6 +6538,21 @@ private fun indexOfSubArray(source: ByteArray, target: ByteArray): Int {
         if (matched) return i
     }
     return -1
+}
+
+private fun parseMaskToken(rawToken: String?): Int? {
+    val token = rawToken
+        ?.trim()
+        ?.trim(*charArrayOf(',', ';', ')', '(', '"', '\''))
+        ?.lowercase(Locale.US)
+        ?: return null
+    if (token.isBlank()) return null
+    val value = when {
+        token.startsWith("0x") -> token.substring(2).toIntOrNull(16)
+        token.startsWith("0b") -> token.substring(2).toIntOrNull(2)
+        else -> token.toIntOrNull()
+    } ?: return null
+    return value and 0xFFFF
 }
 
 private fun filterDecimalInput(input: String): String {
