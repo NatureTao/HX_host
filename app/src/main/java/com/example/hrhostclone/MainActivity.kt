@@ -80,6 +80,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
 import com.hoho.android.usbserial.driver.Ch34xSerialDriver
 import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
 import com.hoho.android.usbserial.driver.ProbeTable
@@ -107,6 +108,7 @@ import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.EnumSet
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -327,9 +329,17 @@ object NcnnEngine {
 }
 
 object OnnxEngine {
+    private data class SessionInitResult(
+        val session: OrtSession,
+        val options: OrtSession.SessionOptions,
+        val providerLabel: String,
+        val providerNote: String? = null
+    )
+
     private val lock = Any()
     private var env: OrtEnvironment? = null
     private var session: OrtSession? = null
+    private var sessionOptions: OrtSession.SessionOptions? = null
     private var inputName: String = "images"
     private var outputName: String = ""
     private var outputType: ai.onnxruntime.OnnxJavaType = ai.onnxruntime.OnnxJavaType.FLOAT
@@ -349,8 +359,10 @@ object OnnxEngine {
     fun init(modelPath: String, threads: Int): Boolean {
         return synchronized(lock) {
             runCatching { session?.close() }
+            runCatching { sessionOptions?.close() }
             runCatching { env?.close() }
             session = null
+            sessionOptions = null
             env = null
             isInitialized = false
             outputName = ""
@@ -358,11 +370,8 @@ object OnnxEngine {
 
             val initResult = runCatching {
                 val e = OrtEnvironment.getEnvironment()
-                val opts = OrtSession.SessionOptions().apply {
-                    setIntraOpNumThreads(threads.coerceIn(1, 8))
-                    setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                }
-                val s = e.createSession(modelPath, opts)
+                val init = createSessionWithFallback(e, modelPath, threads)
+                val s = init.session
                 val firstInput = s.inputInfo.entries.firstOrNull()
                 if (firstInput != null) {
                     inputName = firstInput.key
@@ -407,15 +416,23 @@ object OnnxEngine {
                     ?: ai.onnxruntime.OnnxJavaType.FLOAT
                 env = e
                 session = s
+                sessionOptions = init.options
                 isInitialized = true
                 val outputShape = runCatching {
                     val info = s.outputInfo[outputName]?.info as? ai.onnxruntime.TensorInfo
                     info?.shape?.joinToString("x")
                 }.getOrNull()
+                val providerSuffix = buildString {
+                    append("ep=${init.providerLabel}")
+                    if (!init.providerNote.isNullOrBlank()) {
+                        append(" ")
+                        append(init.providerNote)
+                    }
+                }
                 lastStatus = if (outputShape.isNullOrBlank()) {
-                    "ONNX 已加载: in=${inputW}x$inputH c=$inputChannels ${if (inputNchw) "NCHW" else "NHWC"} ${inputType.name.lowercase(Locale.ROOT)} out=$outputName:${outputType.name.lowercase(Locale.ROOT)}"
+                    "ONNX 已加载: $providerSuffix in=${inputW}x$inputH c=$inputChannels ${if (inputNchw) "NCHW" else "NHWC"} ${inputType.name.lowercase(Locale.ROOT)} out=$outputName:${outputType.name.lowercase(Locale.ROOT)}"
                 } else {
-                    "ONNX 已加载: in=${inputW}x$inputH c=$inputChannels ${if (inputNchw) "NCHW" else "NHWC"} ${inputType.name.lowercase(Locale.ROOT)} out=$outputName:${outputType.name.lowercase(Locale.ROOT)}($outputShape)"
+                    "ONNX 已加载: $providerSuffix in=${inputW}x$inputH c=$inputChannels ${if (inputNchw) "NCHW" else "NHWC"} ${inputType.name.lowercase(Locale.ROOT)} out=$outputName:${outputType.name.lowercase(Locale.ROOT)}($outputShape)"
                 }
             }
             if (initResult.isFailure) {
@@ -424,6 +441,99 @@ object OnnxEngine {
             }
             initResult.isSuccess
         }
+    }
+
+    private fun createSessionWithFallback(
+        environment: OrtEnvironment,
+        modelPath: String,
+        threads: Int
+    ): SessionInitResult {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
+            return createCpuSession(environment, modelPath, threads, "Android 8.1 以下不支持 NNAPI")
+        }
+
+        var acceleratorOnlyError: Throwable? = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val acceleratorOnly = runCatching {
+                createSession(environment, modelPath, threads) { options ->
+                    options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
+                }
+            }
+            if (acceleratorOnly.isSuccess) {
+                return acceleratorOnly.getOrThrow().copy(
+                    providerLabel = "NNAPI",
+                    providerNote = "accelerator-only"
+                )
+            }
+            acceleratorOnlyError = acceleratorOnly.exceptionOrNull()
+        }
+
+        val nnapiAuto = runCatching {
+            createSession(environment, modelPath, threads) { options ->
+                options.addNnapi()
+            }
+        }
+        if (nnapiAuto.isSuccess) {
+            val note = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                "auto-fallback-enabled"
+            } else {
+                "android-api=${Build.VERSION.SDK_INT}"
+            }
+            return nnapiAuto.getOrThrow().copy(
+                providerLabel = "NNAPI",
+                providerNote = note
+            )
+        }
+
+        val detail = buildString {
+            val acceleratorError = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                "accelerator-only=${formatProviderError(acceleratorOnlyError)}"
+            } else {
+                null
+            }
+            val autoError = "nnapi=${formatProviderError(nnapiAuto.exceptionOrNull())}"
+            val parts = listOfNotNull(acceleratorError, autoError)
+            append(parts.joinToString(", "))
+        }.ifBlank { "NNAPI 不可用" }
+
+        return createCpuSession(environment, modelPath, threads, "fallback $detail")
+    }
+
+    private fun createSession(
+        environment: OrtEnvironment,
+        modelPath: String,
+        threads: Int,
+        configureProvider: (OrtSession.SessionOptions) -> Unit
+    ): SessionInitResult {
+        val options = OrtSession.SessionOptions().apply {
+            setIntraOpNumThreads(threads.coerceIn(1, 8))
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        }
+        return try {
+            configureProvider(options)
+            SessionInitResult(
+                session = environment.createSession(modelPath, options),
+                options = options,
+                providerLabel = "CPU"
+            )
+        } catch (t: Throwable) {
+            runCatching { options.close() }
+            throw t
+        }
+    }
+
+    private fun createCpuSession(
+        environment: OrtEnvironment,
+        modelPath: String,
+        threads: Int,
+        note: String? = null
+    ): SessionInitResult {
+        return createSession(environment, modelPath, threads) { _ -> }
+            .copy(providerLabel = "CPU", providerNote = note)
+    }
+
+    private fun formatProviderError(error: Throwable?): String {
+        return error?.message?.take(80)?.ifBlank { null } ?: "unknown"
     }
 
     fun detect(bitmap: Bitmap, confThreshold: Float, nmsThreshold: Float): List<DetectionBox> {
