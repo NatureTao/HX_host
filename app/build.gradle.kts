@@ -43,6 +43,8 @@ android {
 }
 
 dependencies {
+    val neuroPilotAar = file("libs/neuropilot.aar")
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -69,4 +71,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended:1.6.0")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     implementation("com.github.mik3y:usb-serial-for-android:3.9.0")
+    if (neuroPilotAar.exists()) {
+        implementation(files(neuroPilotAar))
+    }
 }

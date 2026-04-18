@@ -37,6 +37,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -71,6 +72,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -79,6 +83,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
@@ -169,6 +174,8 @@ private val MAKCU_BAUD_CANDIDATES_CH343 = intArrayOf(
 )
 private const val AUTO_CONFIG_PREFS = "hx_host_prefs"
 private const val AUTO_CONFIG_KEY = "app_auto_config_json"
+private const val BILIBILI_GUIDE_DISMISSED_KEY = "bilibili_guide_dismissed"
+private const val BILIBILI_SPACE_URL = "https://space.bilibili.com/323658012"
 private const val ONNX_LOG_TAG = "HXHostOnnx"
 private const val ONNX_RUNTIME_LOG_LIMIT = 48
 private const val ONNX_INFERENCE_LOG_INTERVAL_MS = 3000L
@@ -187,6 +194,18 @@ private const val KMBOX_NET_MONITOR_MAGIC = 0xAA550000.toInt()
 enum class InputBackend(val label: String) {
     MakcuUsb("MAKCU USB"),
     KmboxNet("KMBOX NET")
+}
+
+enum class AppLanguage(val code: String, val displayName: String) {
+    English("en", "English"),
+    SimplifiedChinese("zh-Hans", "简体中文"),
+    TraditionalChinese("zh-Hant", "繁體中文");
+
+    companion object {
+        fun fromCode(code: String?): AppLanguage {
+            return entries.firstOrNull { it.code == code } ?: detectSystemLanguage()
+        }
+    }
 }
 
 enum class ModelKind { NCNN, ONNX, FILE }
@@ -221,18 +240,315 @@ data class HotkeyConfig(
     val sensitivity: Float = 0.5f
 )
 
-enum class AppTab(val label: String, val icon: ImageVector) {
-    Monitor("来源与监控", Icons.Outlined.Visibility),
-    Input("输入控制", Icons.Outlined.Gamepad),
-    Function("功能", Icons.Outlined.Extension),
-    About("关于", Icons.Outlined.Info),
-    Settings("设置", Icons.Outlined.Settings)
+enum class AppTab(val icon: ImageVector) {
+    Monitor(Icons.Outlined.Visibility),
+    Input(Icons.Outlined.Gamepad),
+    Function(Icons.Outlined.Extension),
+    About(Icons.Outlined.Info),
+    Settings(Icons.Outlined.Settings)
+}
+
+private data class AppTextBundle(
+    val language: AppLanguage,
+    val tabMonitor: String,
+    val tabInput: String,
+    val tabFunction: String,
+    val tabAbout: String,
+    val tabSettings: String,
+    val exportConfigLabel: String,
+    val importConfigLabel: String,
+    val runningStatusLabel: String,
+    val idleStatusLabel: String,
+    val versionLabel: String,
+    val receiveLabel: String,
+    val inferenceLabel: String,
+    val latencyLabel: String,
+    val targetCountLabel: String,
+    val stoppedLabel: String,
+    val waitingToStartLabel: String,
+    val stopLabel: String,
+    val startInferenceLabel: String,
+    val modelSelectionTitle: String,
+    val modelOptionsBoxLabel: String,
+    val noModelsHint: String,
+    val modelSupportHint: String,
+    val nnapiAccelerationTitle: String,
+    val nnapiEnabledHint: String,
+    val nnapiDisabledHint: String,
+    val currentBackendLabel: String,
+    val onnxStatusLabel: String,
+    val onnxRuntimeLogsTitle: String,
+    val clearLabel: String,
+    val noRuntimeLogsLabel: String,
+    val detectionParametersTitle: String,
+    val confidenceThresholdTitle: String,
+    val nmsThresholdTitle: String,
+    val transportProtocolTitle: String,
+    val streamConfigTitle: String,
+    val streamConfigHint: String,
+    val localIpLabel: String,
+    val listenPortLabel: String,
+    val noModelLoadedLabel: String,
+    val waitingLoadNcnnLabel: String,
+    val selectModelPromptLabel: String,
+    val noModelSelectedLabel: String,
+    val inputControlTitle: String,
+    val deviceConnectionTab: String,
+    val controlParametersTab: String,
+    val inputBackendTitle: String,
+    val hotkeyPrefix: String,
+    val pdControlTitle: String,
+    val pdControlHint: String,
+    val xAxisTitle: String,
+    val yAxisTitle: String,
+    val diagnosticsSafetyTitle: String,
+    val diagnosticsSafetyHint: String,
+    val pdOverlayTitle: String,
+    val pdOverlayHint: String,
+    val deviceDebugModeTitle: String,
+    val deviceDebugModeHint: String,
+    val stuckHoldRecoveryTitle: String,
+    val stuckHoldRecoveryHint: String,
+    val runtimeSnapshotTitle: String,
+    val aimRangeLimitTitle: String,
+    val aimRangeLimitHint: String,
+    val rangeRadiusTitle: String,
+    val rangeRadiusHint: String,
+    val kpLabel: String,
+    val kdLabel: String,
+    val smoothingLabel: String,
+    val deadzoneLabel: String,
+    val maxOutputLabel: String,
+    val functionTitle: String,
+    val targetTrackingTitle: String,
+    val enableTrackingTitle: String,
+    val trackingSubtitle: String,
+    val confirmThresholdTitle: String,
+    val confirmThresholdHint: String,
+    val vanishThresholdTitle: String,
+    val vanishThresholdHint: String,
+    val measureNoiseTitle: String,
+    val measureNoiseHint: String,
+    val vanishHeightRatioTitle: String,
+    val vanishHeightRatioHint: String,
+    val stableBottomThresholdTitle: String,
+    val stableBottomThresholdHint: String,
+    val edgeMarginTitle: String,
+    val edgeMarginHint: String,
+    val aboutTitle: String,
+    val aboutAuthor: String,
+    val connectLabel: String,
+    val disconnectLabel: String,
+    val connectedLabel: String,
+    val disconnectedLabel: String,
+    val connectedDeviceTitle: String,
+    val currentDeviceTitle: String,
+    val deviceMonitorTestTitle: String,
+    val noMouseButtonsPressedLabel: String,
+    val pressedDetectedPrefix: String,
+    val debugModeTitle: String,
+    val parserDebugHint: String,
+    val safetyFallbackTitle: String,
+    val safetyFallbackHint: String,
+    val parseDebugPrefix: String,
+    val protocolDebugPrefix: String,
+    val drawSquareLabel: String,
+    val drawCircleLabel: String,
+    val trajectorySpeedTitle: String,
+    val mappingPrefix: String,
+    val calibrationButtonTitle: String,
+    val restoreDefaultLabel: String,
+    val pollButtonsLabel: String,
+    val readyLabel: String,
+    val usbDiagnosticsTitle: String,
+    val refreshLabel: String,
+    val usbHostSupportedLabel: String,
+    val otgHint: String,
+    val tapDeviceToConnectHint: String,
+    val authorizedLabel: String,
+    val authorizeLabel: String,
+    val kmboxConnectedLabel: String,
+    val kmboxDisconnectedLabel: String,
+    val kmboxConfigTitle: String,
+    val deviceIpFieldLabel: String,
+    val controlPortFieldLabel: String,
+    val uuidFieldLabel: String,
+    val kmboxExampleHint: String,
+    val hotkeySwitchSuffix: String,
+    val enabledStateLabel: String,
+    val disabledStateLabel: String,
+    val triggerButtonTitle: String,
+    val autoAimTitle: String,
+    val targetSelectionModeTitle: String,
+    val modeRecentCrosshairLabel: String,
+    val modeClassPriorityLabel: String,
+    val aimCategoryTitle: String,
+    val classPriorityTitle: String,
+    val classPriorityHint: String,
+    val yOffsetTitle: String,
+    val yOffsetHint: String,
+    val autoFireTitle: String,
+    val fireRangeTitle: String,
+    val initialDelayTitle: String,
+    val minClickTitle: String,
+    val maxClickTitle: String,
+    val minIntervalTitle: String,
+    val maxIntervalTitle: String,
+    val burstIntervalTitle: String,
+    val settingsTitle: String,
+    val networkTitle: String,
+    val networkSubtitle: String,
+    val udpPortLabel: String,
+    val tcpPortLabel: String,
+    val performanceTitle: String,
+    val coreCountSuffix: String,
+    val inferenceThreadsLabel: String,
+    val receiveFpsLabel: String,
+    val threadHint: String,
+    val receiveFpsHint: String,
+    val appearanceTitle: String,
+    val dynamicColorTitle: String,
+    val dynamicColorSubtitle: String,
+    val languageTitle: String,
+    val languageSubtitle: String,
+    val bilibiliGuideTitle: String,
+    val bilibiliGuideBody: String,
+    val bilibiliGuideOpenButton: String,
+    val bilibiliGuideDismissButton: String,
+    val executionPathLabel: String,
+    val deviceSocLabel: String,
+    val deviceHardwareLabel: String,
+    val mediatekDirectSdkLabel: String
+) {
+    fun hotkeyName(index: Int): String = "$hotkeyPrefix$index"
+
+    fun recentLogsSummary(count: Int): String {
+        return when (language) {
+            AppLanguage.English -> "Latest $count entries, also mirrored to Logcat/$ONNX_LOG_TAG"
+            AppLanguage.SimplifiedChinese -> "最近 $count 条，会同步写入 Logcat/$ONNX_LOG_TAG"
+            AppLanguage.TraditionalChinese -> "最近 $count 條，會同步寫入 Logcat/$ONNX_LOG_TAG"
+        }
+    }
+
+    fun mouseButtonLabel(index: Int): String {
+        val labels = when (language) {
+            AppLanguage.English -> listOf("Left", "Right", "Middle", "Side Up", "Side Down")
+            AppLanguage.SimplifiedChinese -> listOf("左", "右", "中", "上侧", "下侧")
+            AppLanguage.TraditionalChinese -> listOf("左", "右", "中", "上側", "下側")
+        }
+        return labels.getOrElse(index) { labels.first() }
+    }
+
+    fun classShortLabel(index: Int): String {
+        return when (language) {
+            AppLanguage.English -> "Class $index"
+            AppLanguage.SimplifiedChinese -> "类$index"
+            AppLanguage.TraditionalChinese -> "類$index"
+        }
+    }
+
+    fun categoryLabel(index: Int): String {
+        return when (language) {
+            AppLanguage.English -> "Category $index"
+            AppLanguage.SimplifiedChinese -> "类别$index"
+            AppLanguage.TraditionalChinese -> "類別$index"
+        }
+    }
+
+    fun categoryOrderLabel(position: Int, klass: Int): String {
+        return when (language) {
+            AppLanguage.English -> "${position + 1}.  Category $klass"
+            AppLanguage.SimplifiedChinese -> "${position + 1}.  类别 $klass"
+            AppLanguage.TraditionalChinese -> "${position + 1}.  類別 $klass"
+        }
+    }
+
+    fun detectedPressedText(names: String): String {
+        return if (names.isBlank()) {
+            noMouseButtonsPressedLabel
+        } else {
+            "$pressedDetectedPrefix: $names"
+        }
+    }
+
+    fun trajectorySpeedValueLabel(ms: Int): String {
+        return when (language) {
+            AppLanguage.English -> "$ms ms/step"
+            AppLanguage.SimplifiedChinese -> "$ms ms/步"
+            AppLanguage.TraditionalChinese -> "$ms ms/步"
+        }
+    }
+
+    fun detectedDeviceCountText(count: Int): String {
+        return when (language) {
+            AppLanguage.English -> "Detected devices: $count"
+            AppLanguage.SimplifiedChinese -> "检测到设备: $count 个"
+            AppLanguage.TraditionalChinese -> "偵測到裝置: $count 個"
+        }
+    }
+
+    fun lastSentStatus(message: String): String {
+        return when (language) {
+            AppLanguage.English -> "Last sent: $message"
+            AppLanguage.SimplifiedChinese -> "最近发送: $message"
+            AppLanguage.TraditionalChinese -> "最近發送: $message"
+        }
+    }
+
+    fun sendFailedStatus(message: String): String {
+        return when (language) {
+            AppLanguage.English -> "Send failed: $message"
+            AppLanguage.SimplifiedChinese -> "发送失败: $message"
+            AppLanguage.TraditionalChinese -> "發送失敗: $message"
+        }
+    }
+
+    fun sendExceptionStatus(detail: String): String {
+        return when (language) {
+            AppLanguage.English -> "Send exception: $detail"
+            AppLanguage.SimplifiedChinese -> "发送异常: $detail"
+            AppLanguage.TraditionalChinese -> "發送異常: $detail"
+        }
+    }
+
+    fun calibrationStopLabel(progress: Int, total: Int): String {
+        return when (language) {
+            AppLanguage.English -> "Stop calibration ($progress/$total)"
+            AppLanguage.SimplifiedChinese -> "停止校准($progress/$total)"
+            AppLanguage.TraditionalChinese -> "停止校準($progress/$total)"
+        }
+    }
+
+    fun calibrationPressButtonMessage(label: String): String {
+        return when (language) {
+            AppLanguage.English -> "Press [$label]"
+            AppLanguage.SimplifiedChinese -> "请按下【$label】"
+            AppLanguage.TraditionalChinese -> "請按下【$label】"
+        }
+    }
+
+    fun calibrationRecordedMessage(label: String, bitHex: String): String {
+        return when (language) {
+            AppLanguage.English -> "Recorded $label -> $bitHex, release the button"
+            AppLanguage.SimplifiedChinese -> "已记录 $label -> $bitHex，请松开按键"
+            AppLanguage.TraditionalChinese -> "已記錄 $label -> $bitHex，請鬆開按鍵"
+        }
+    }
+
+    fun calibrationRecordFailedMessage(label: String): String {
+        return when (language) {
+            AppLanguage.English -> "Recording $label failed, try again"
+            AppLanguage.SimplifiedChinese -> "记录 $label 失败，请重试"
+            AppLanguage.TraditionalChinese -> "記錄 $label 失敗，請重試"
+        }
+    }
 }
 
 data class StreamStats(
     val connected: Boolean = false,
     val protocol: String = "UDP",
     val receiveFps: Int = 0,
+    val inferenceFps: Int = 0,
     val bytesPerSec: Long = 0,
     val targetCount: Int = 0,
     val latencyMs: Int = 0
@@ -317,6 +633,706 @@ private data class MakcuButtonsParseResult(
     val dataPreview: ByteArray
 )
 
+private fun detectSystemLanguage(): AppLanguage {
+    val locale = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        android.os.LocaleList.getDefault().get(0) ?: Locale.getDefault()
+    } else {
+        Locale.getDefault()
+    }
+    if (locale.language != "zh") return AppLanguage.English
+
+    val script = runCatching { locale.script }.getOrDefault("")
+    val country = locale.country.uppercase(Locale.ROOT)
+    return when {
+        script.equals("Hant", ignoreCase = true) -> AppLanguage.TraditionalChinese
+        script.equals("Hans", ignoreCase = true) -> AppLanguage.SimplifiedChinese
+        country in setOf("TW", "HK", "MO") -> AppLanguage.TraditionalChinese
+        else -> AppLanguage.SimplifiedChinese
+    }
+}
+
+private fun appTextBundle(language: AppLanguage): AppTextBundle {
+    return when (language) {
+        AppLanguage.English -> AppTextBundle(
+            language = language,
+            tabMonitor = "Monitor",
+            tabInput = "Input",
+            tabFunction = "Functions",
+            tabAbout = "About",
+            tabSettings = "Settings",
+            exportConfigLabel = "Export config",
+            importConfigLabel = "Import config",
+            runningStatusLabel = "Running",
+            idleStatusLabel = "Idle",
+            versionLabel = "Version",
+            receiveLabel = "Receive",
+            inferenceLabel = "Inference",
+            latencyLabel = "Latency",
+            targetCountLabel = "Targets",
+            stoppedLabel = "Stopped",
+            waitingToStartLabel = "Waiting to start",
+            stopLabel = "Stop",
+            startInferenceLabel = "Start inference",
+            modelSelectionTitle = "Model selection",
+            modelOptionsBoxLabel = "Model options",
+            noModelsHint = "No models yet, import one first",
+            modelSupportHint = "Supported: .param/.bin (NCNN), .onnx (YOLOv8/v11/INT8)",
+            nnapiAccelerationTitle = "NNAPI acceleration",
+            nnapiEnabledHint = "Try NNAPI/NPU first and fall back to CPU automatically if unsupported.",
+            nnapiDisabledHint = "Use CPU inference only.",
+            currentBackendLabel = "Current backend",
+            onnxStatusLabel = "ONNX status",
+            onnxRuntimeLogsTitle = "ONNX runtime logs",
+            clearLabel = "Clear",
+            noRuntimeLogsLabel = "No runtime logs yet",
+            detectionParametersTitle = "Detection parameters",
+            confidenceThresholdTitle = "Confidence threshold",
+            nmsThresholdTitle = "NMS threshold",
+            transportProtocolTitle = "Transport protocol",
+            streamConfigTitle = "Video stream configuration",
+            streamConfigHint = "Run the HX companion TCP streamer on your computer.",
+            localIpLabel = "Local IP",
+            listenPortLabel = "Listen port",
+            noModelLoadedLabel = "No model loaded",
+            waitingLoadNcnnLabel = "Waiting for NCNN load",
+            selectModelPromptLabel = "Please select a model",
+            noModelSelectedLabel = "No model selected",
+            inputControlTitle = "Input Control",
+            deviceConnectionTab = "Device",
+            controlParametersTab = "Control",
+            inputBackendTitle = "Input backend",
+            hotkeyPrefix = "Hotkey ",
+            pdControlTitle = "PD control parameters",
+            pdControlHint = "Tune values gradually from small to large. Start with Kp and Kd first.",
+            xAxisTitle = "X Axis (Horizontal)",
+            yAxisTitle = "Y Axis (Vertical)",
+            diagnosticsSafetyTitle = "Live diagnostics and safety",
+            diagnosticsSafetyHint = "Overlay shows err/pd/move/fire states on screen. Debug mode helps inspect device parsing.",
+            pdOverlayTitle = "PD diagnostics overlay",
+            pdOverlayHint = "Draw err/pd/move/fire states on the preview.",
+            deviceDebugModeTitle = "Device debug mode",
+            deviceDebugModeHint = "Show parser source and recent RX summaries.",
+            stuckHoldRecoveryTitle = "Stuck hold safety recovery",
+            stuckHoldRecoveryHint = "Try clearing state and restarting button streaming when input gets stuck.",
+            runtimeSnapshotTitle = "Runtime snapshot",
+            aimRangeLimitTitle = "Aim range limit",
+            aimRangeLimitHint = "Only aim at targets inside the center circle.",
+            rangeRadiusTitle = "Range radius",
+            rangeRadiusHint = "Percentage of half the shorter screen side.",
+            kpLabel = "Proportional gain Kp",
+            kdLabel = "Derivative gain Kd",
+            smoothingLabel = "Smoothing",
+            deadzoneLabel = "Deadzone",
+            maxOutputLabel = "Max output",
+            functionTitle = "Functions",
+            targetTrackingTitle = "Target tracking",
+            enableTrackingTitle = "Enable tracking",
+            trackingSubtitle = "Multi-target tracking with a Kalman filter.",
+            confirmThresholdTitle = "Confirm threshold",
+            confirmThresholdHint = "A target becomes valid after being detected for N consecutive frames.",
+            vanishThresholdTitle = "Vanish threshold",
+            vanishThresholdHint = "Delete a target after predicting it as missing for N frames.",
+            measureNoiseTitle = "Measurement noise R",
+            measureNoiseHint = "Higher values smooth boxes more, but react slower.",
+            vanishHeightRatioTitle = "Vanish height ratio",
+            vanishHeightRatioHint = "Treat a target as vanished once height shrinks beyond this ratio.",
+            stableBottomThresholdTitle = "Stable bottom threshold",
+            stableBottomThresholdHint = "Bottom movement below this value is treated as stable.",
+            edgeMarginTitle = "Edge detection margin",
+            edgeMarginHint = "Targets closer than this distance to the edge are treated as edge targets.",
+            aboutTitle = "About",
+            aboutAuthor = "Adai",
+            connectLabel = "Connect",
+            disconnectLabel = "Disconnect",
+            connectedLabel = "Connected",
+            disconnectedLabel = "Disconnected",
+            connectedDeviceTitle = "Connected device",
+            currentDeviceTitle = "Current device",
+            deviceMonitorTestTitle = "Device monitoring and testing",
+            noMouseButtonsPressedLabel = "No mouse buttons detected as pressed",
+            pressedDetectedPrefix = "Pressed",
+            debugModeTitle = "Debug mode",
+            parserDebugHint = "Show parser source and recent RX summaries.",
+            safetyFallbackTitle = "Safety fallback",
+            safetyFallbackHint = "Try clearing stuck long-press states automatically.",
+            parseDebugPrefix = "Parser debug",
+            protocolDebugPrefix = "Protocol debug",
+            drawSquareLabel = "Draw square",
+            drawCircleLabel = "Draw circle",
+            trajectorySpeedTitle = "Trajectory speed (smaller is faster)",
+            mappingPrefix = "Button mapping",
+            calibrationButtonTitle = "Button calibration",
+            restoreDefaultLabel = "Restore default",
+            pollButtonsLabel = "Poll buttons",
+            readyLabel = "Ready",
+            usbDiagnosticsTitle = "USB diagnostics",
+            refreshLabel = "Refresh",
+            usbHostSupportedLabel = "USB Host: Supported",
+            otgHint = "Some phones need OTG to be enabled in system settings.",
+            tapDeviceToConnectHint = "Tap a device to connect",
+            authorizedLabel = "Authorized",
+            authorizeLabel = "Authorize",
+            kmboxConnectedLabel = "KMBOX connected",
+            kmboxDisconnectedLabel = "KMBOX disconnected",
+            kmboxConfigTitle = "KMBOX NET configuration",
+            deviceIpFieldLabel = "Device IP",
+            controlPortFieldLabel = "Control port",
+            uuidFieldLabel = "UUID (8 hex digits)",
+            kmboxExampleHint = "Example: IP `192.168.2.188`, control port `6234`, monitor port `6235`.",
+            hotkeySwitchSuffix = " switch",
+            enabledStateLabel = "Enabled",
+            disabledStateLabel = "Disabled",
+            triggerButtonTitle = "Trigger button",
+            autoAimTitle = "Auto aim",
+            targetSelectionModeTitle = "Target selection mode",
+            modeRecentCrosshairLabel = "Nearest crosshair",
+            modeClassPriorityLabel = "Class priority",
+            aimCategoryTitle = "Aim categories",
+            classPriorityTitle = "Category priority",
+            classPriorityHint = "Long press to adjust order",
+            yOffsetTitle = "Y-axis offset",
+            yOffsetHint = "0%=head 100%=feet",
+            autoFireTitle = "Auto fire",
+            fireRangeTitle = "Fire range (px)",
+            initialDelayTitle = "Initial delay (ms)",
+            minClickTitle = "Min clicks",
+            maxClickTitle = "Max clicks",
+            minIntervalTitle = "Min interval (ms)",
+            maxIntervalTitle = "Max interval (ms)",
+            burstIntervalTitle = "Burst interval (ms)",
+            settingsTitle = "Settings",
+            networkTitle = "Network",
+            networkSubtitle = "Keep these ports aligned with the streaming side.",
+            udpPortLabel = "UDP Port",
+            tcpPortLabel = "TCP Port",
+            performanceTitle = "Performance",
+            coreCountSuffix = "cores",
+            inferenceThreadsLabel = "Inference threads",
+            receiveFpsLabel = "Receive FPS",
+            threadHint = "More threads are not always better. Matching your CPU big-core count is usually best, and 3-4 is a good default.",
+            receiveFpsHint = "Cap incoming frame rate and drop extra frames to save inference overhead.",
+            appearanceTitle = "Appearance",
+            dynamicColorTitle = "Dynamic color",
+            dynamicColorSubtitle = "Follow the system wallpaper palette.",
+            languageTitle = "Language",
+            languageSubtitle = "Changes in this page and the navigation labels apply immediately.",
+            bilibiliGuideTitle = "Follow The Creator",
+            bilibiliGuideBody = "On first launch, you can jump to the creator's Bilibili homepage at any time. After returning, tap the button below to continue into the app.",
+            bilibiliGuideOpenButton = "Open Bilibili homepage",
+            bilibiliGuideDismissButton = "Later / Continue",
+            executionPathLabel = "Execution path",
+            deviceSocLabel = "Device SoC",
+            deviceHardwareLabel = "Hardware",
+            mediatekDirectSdkLabel = "MediaTek direct SDK"
+        )
+        AppLanguage.SimplifiedChinese -> AppTextBundle(
+            language = language,
+            tabMonitor = "来源与监控",
+            tabInput = "输入控制",
+            tabFunction = "功能",
+            tabAbout = "关于",
+            tabSettings = "设置",
+            exportConfigLabel = "导出配置",
+            importConfigLabel = "导入配置",
+            runningStatusLabel = "工作中",
+            idleStatusLabel = "待机中",
+            versionLabel = "版本",
+            receiveLabel = "接收",
+            inferenceLabel = "推理",
+            latencyLabel = "延迟",
+            targetCountLabel = "目标数",
+            stoppedLabel = "已停止",
+            waitingToStartLabel = "等待启动",
+            stopLabel = "停止",
+            startInferenceLabel = "启动推理",
+            modelSelectionTitle = "模型选择",
+            modelOptionsBoxLabel = "模型选项框",
+            noModelsHint = "暂无模型，请先导入",
+            modelSupportHint = "支持: .param/.bin (NCNN), .onnx (YOLOv8/v11/INT8)",
+            nnapiAccelerationTitle = "NNAPI 加速",
+            nnapiEnabledHint = "开启后优先尝试 NNAPI/NPU，不支持时自动回退 CPU",
+            nnapiDisabledHint = "已固定使用 CPU 推理",
+            currentBackendLabel = "当前后端",
+            onnxStatusLabel = "ONNX 状态",
+            onnxRuntimeLogsTitle = "ONNX 运行日志",
+            clearLabel = "清空",
+            noRuntimeLogsLabel = "暂无运行日志",
+            detectionParametersTitle = "检测参数",
+            confidenceThresholdTitle = "置信度阈值",
+            nmsThresholdTitle = "NMS 阈值",
+            transportProtocolTitle = "传输协议",
+            streamConfigTitle = "画面传输配置",
+            streamConfigHint = "请在电脑端运行HX模拟副机专用TCP推流器",
+            localIpLabel = "本机 IP",
+            listenPortLabel = "监听端口",
+            noModelLoadedLabel = "未加载模型",
+            waitingLoadNcnnLabel = "等待加载 NCNN",
+            selectModelPromptLabel = "请选择模型",
+            noModelSelectedLabel = "未选择模型",
+            inputControlTitle = "输入控制",
+            deviceConnectionTab = "设备连接",
+            controlParametersTab = "控制参数",
+            inputBackendTitle = "输入后端",
+            hotkeyPrefix = "热键",
+            pdControlTitle = "PD 控制参数",
+            pdControlHint = "参数需要由小到大慢慢微调，建议先只调整 Kp 和 Kd",
+            xAxisTitle = "X 轴（水平）",
+            yAxisTitle = "Y 轴（垂直）",
+            diagnosticsSafetyTitle = "实时诊断与安全",
+            diagnosticsSafetyHint = "overlay 用于在画面上直接看误差、PD 输出和自动射击状态；调试模式用于设备解析排查。",
+            pdOverlayTitle = "PD 诊断 Overlay",
+            pdOverlayHint = "在预览画面叠加 err/pd/move/fire 状态",
+            deviceDebugModeTitle = "设备调试模式",
+            deviceDebugModeHint = "显示 parser 来源和最近 RX 摘要",
+            stuckHoldRecoveryTitle = "卡住长按安全回退",
+            stuckHoldRecoveryHint = "持续无新输入时尝试清零并重启按键流",
+            runtimeSnapshotTitle = "运行时快照",
+            aimRangeLimitTitle = "瞄准范围限制",
+            aimRangeLimitHint = "只瞄准屏幕中心圆圈内的目标",
+            rangeRadiusTitle = "范围半径",
+            rangeRadiusHint = "相对于画面短边一半的百分比",
+            kpLabel = "比例增益 Kp",
+            kdLabel = "微分增益 Kd",
+            smoothingLabel = "平滑系数",
+            deadzoneLabel = "死区",
+            maxOutputLabel = "最大输出",
+            functionTitle = "功能",
+            targetTrackingTitle = "目标追踪",
+            enableTrackingTitle = "启用追踪",
+            trackingSubtitle = "卡尔曼滤波器多目标追踪",
+            confirmThresholdTitle = "确认阈值",
+            confirmThresholdHint = "连续检测 N 帧后确认为有效目标",
+            vanishThresholdTitle = "消失阈值",
+            vanishThresholdHint = "丢失后预测 N 帧后删除目标",
+            measureNoiseTitle = "测量噪声 R",
+            measureNoiseHint = "值越大检测框越平滑，但响应越慢",
+            vanishHeightRatioTitle = "消失高度比例",
+            vanishHeightRatioHint = "高度缩小超过此比例判定为消失",
+            stableBottomThresholdTitle = "消失底部阈值",
+            stableBottomThresholdHint = "底部位置变化小于此值视为稳定",
+            edgeMarginTitle = "边缘检测边距",
+            edgeMarginHint = "距离边缘小于此值视为边缘目标",
+            aboutTitle = "关于",
+            aboutAuthor = "阿呆",
+            connectLabel = "连接",
+            disconnectLabel = "断开",
+            connectedLabel = "已连接",
+            disconnectedLabel = "未连接",
+            connectedDeviceTitle = "已连接设备",
+            currentDeviceTitle = "当前设备",
+            deviceMonitorTestTitle = "设备监控与测试",
+            noMouseButtonsPressedLabel = "未检测到鼠标按键按下",
+            pressedDetectedPrefix = "检测到按下",
+            debugModeTitle = "调试模式",
+            parserDebugHint = "显示解析来源和最近 RX 摘要",
+            safetyFallbackTitle = "安全回退",
+            safetyFallbackHint = "长按卡住时尝试自动清零",
+            parseDebugPrefix = "解析调试",
+            protocolDebugPrefix = "协议调试",
+            drawSquareLabel = "画正方形",
+            drawCircleLabel = "画圆形",
+            trajectorySpeedTitle = "轨迹速度 (越快数值越小)",
+            mappingPrefix = "按键位映射",
+            calibrationButtonTitle = "按键位校准",
+            restoreDefaultLabel = "恢复默认",
+            pollButtonsLabel = "主动轮询按键",
+            readyLabel = "准备就绪",
+            usbDiagnosticsTitle = "USB 诊断",
+            refreshLabel = "刷新",
+            usbHostSupportedLabel = "USB Host: 支持",
+            otgHint = "部分手机需在设置中开启 OTG 功能",
+            tapDeviceToConnectHint = "点击设备进行连接",
+            authorizedLabel = "已授权",
+            authorizeLabel = "授权",
+            kmboxConnectedLabel = "KMBOX 已连接",
+            kmboxDisconnectedLabel = "KMBOX 未连接",
+            kmboxConfigTitle = "KMBOX NET 配置",
+            deviceIpFieldLabel = "设备 IP",
+            controlPortFieldLabel = "控制端口",
+            uuidFieldLabel = "UUID (8位十六进制)",
+            kmboxExampleHint = "示例：IP `192.168.2.188`，控制端口 `6234`，监听端口建议 `6235`。",
+            hotkeySwitchSuffix = "开关",
+            enabledStateLabel = "已启用",
+            disabledStateLabel = "已禁用",
+            triggerButtonTitle = "触发按键",
+            autoAimTitle = "自动瞄准",
+            targetSelectionModeTitle = "目标选择模式",
+            modeRecentCrosshairLabel = "最近准星",
+            modeClassPriorityLabel = "类别优先",
+            aimCategoryTitle = "瞄准类别",
+            classPriorityTitle = "类别优先级",
+            classPriorityHint = "长按拖拽调整顺序",
+            yOffsetTitle = "Y轴偏移",
+            yOffsetHint = "0%=头 100%=脚",
+            autoFireTitle = "自动射击",
+            fireRangeTitle = "射击范围 (px)",
+            initialDelayTitle = "初始延迟 (ms)",
+            minClickTitle = "最小点击",
+            maxClickTitle = "最大点击",
+            minIntervalTitle = "间隔最小 (ms)",
+            maxIntervalTitle = "间隔最大 (ms)",
+            burstIntervalTitle = "连射间隔 (ms)",
+            settingsTitle = "设置",
+            networkTitle = "网络配置",
+            networkSubtitle = "端口配置需与推流端一致",
+            udpPortLabel = "UDP 端口",
+            tcpPortLabel = "TCP 端口",
+            performanceTitle = "性能设置",
+            coreCountSuffix = "核心",
+            inferenceThreadsLabel = "推理线程数",
+            receiveFpsLabel = "接收帧率",
+            threadHint = "提示：线程数并非越多越好，建议根据 CPU 大核数量设置，默认 3-4 即可。",
+            receiveFpsHint = "限制接收帧率，超出部分丢弃，为推理节省性能开销。",
+            appearanceTitle = "外观设置",
+            dynamicColorTitle = "动态颜色",
+            dynamicColorSubtitle = "跟随系统壁纸配色",
+            languageTitle = "语言",
+            languageSubtitle = "当前会立即应用到设置页和底部导航标签。",
+            bilibiliGuideTitle = "先去看看作者主页",
+            bilibiliGuideBody = "这是首次启动引导。你可以先跳转到作者的 B站主页，返回后再点击下方按钮继续进入程序。",
+            bilibiliGuideOpenButton = "打开 B站主页",
+            bilibiliGuideDismissButton = "稍后再说 / 继续进入",
+            executionPathLabel = "执行路径",
+            deviceSocLabel = "设备 SoC",
+            deviceHardwareLabel = "硬件信息",
+            mediatekDirectSdkLabel = "联发科直连 SDK"
+        )
+        AppLanguage.TraditionalChinese -> AppTextBundle(
+            language = language,
+            tabMonitor = "來源與監控",
+            tabInput = "輸入控制",
+            tabFunction = "功能",
+            tabAbout = "關於",
+            tabSettings = "設定",
+            exportConfigLabel = "匯出設定",
+            importConfigLabel = "匯入設定",
+            runningStatusLabel = "運行中",
+            idleStatusLabel = "待機中",
+            versionLabel = "版本",
+            receiveLabel = "接收",
+            inferenceLabel = "推論",
+            latencyLabel = "延遲",
+            targetCountLabel = "目標數",
+            stoppedLabel = "已停止",
+            waitingToStartLabel = "等待啟動",
+            stopLabel = "停止",
+            startInferenceLabel = "啟動推論",
+            modelSelectionTitle = "模型選擇",
+            modelOptionsBoxLabel = "模型選項",
+            noModelsHint = "暫無模型，請先匯入",
+            modelSupportHint = "支援: .param/.bin (NCNN), .onnx (YOLOv8/v11/INT8)",
+            nnapiAccelerationTitle = "NNAPI 加速",
+            nnapiEnabledHint = "開啟後優先嘗試 NNAPI/NPU，不支援時自動回退 CPU",
+            nnapiDisabledHint = "已固定使用 CPU 推論",
+            currentBackendLabel = "目前後端",
+            onnxStatusLabel = "ONNX 狀態",
+            onnxRuntimeLogsTitle = "ONNX 執行日誌",
+            clearLabel = "清空",
+            noRuntimeLogsLabel = "暫無執行日誌",
+            detectionParametersTitle = "檢測參數",
+            confidenceThresholdTitle = "置信度閾值",
+            nmsThresholdTitle = "NMS 閾值",
+            transportProtocolTitle = "傳輸協議",
+            streamConfigTitle = "畫面傳輸設定",
+            streamConfigHint = "請在電腦端執行 HX 模擬副機專用 TCP 推流器",
+            localIpLabel = "本機 IP",
+            listenPortLabel = "監聽連接埠",
+            noModelLoadedLabel = "未載入模型",
+            waitingLoadNcnnLabel = "等待載入 NCNN",
+            selectModelPromptLabel = "請選擇模型",
+            noModelSelectedLabel = "未選擇模型",
+            inputControlTitle = "輸入控制",
+            deviceConnectionTab = "裝置連線",
+            controlParametersTab = "控制參數",
+            inputBackendTitle = "輸入後端",
+            hotkeyPrefix = "熱鍵",
+            pdControlTitle = "PD 控制參數",
+            pdControlHint = "參數需要由小到大慢慢微調，建議先只調整 Kp 和 Kd",
+            xAxisTitle = "X 軸（水平）",
+            yAxisTitle = "Y 軸（垂直）",
+            diagnosticsSafetyTitle = "即時診斷與安全",
+            diagnosticsSafetyHint = "overlay 用於在畫面上直接查看誤差、PD 輸出和自動射擊狀態；調試模式用於裝置解析排查。",
+            pdOverlayTitle = "PD 診斷 Overlay",
+            pdOverlayHint = "在預覽畫面疊加 err/pd/move/fire 狀態",
+            deviceDebugModeTitle = "裝置調試模式",
+            deviceDebugModeHint = "顯示 parser 來源與最近 RX 摘要",
+            stuckHoldRecoveryTitle = "卡住長按安全回退",
+            stuckHoldRecoveryHint = "持續無新輸入時嘗試清零並重啟按鍵流",
+            runtimeSnapshotTitle = "執行時快照",
+            aimRangeLimitTitle = "瞄準範圍限制",
+            aimRangeLimitHint = "只瞄準螢幕中心圓圈內的目標",
+            rangeRadiusTitle = "範圍半徑",
+            rangeRadiusHint = "相對於畫面短邊一半的百分比",
+            kpLabel = "比例增益 Kp",
+            kdLabel = "微分增益 Kd",
+            smoothingLabel = "平滑係數",
+            deadzoneLabel = "死區",
+            maxOutputLabel = "最大輸出",
+            functionTitle = "功能",
+            targetTrackingTitle = "目標追蹤",
+            enableTrackingTitle = "啟用追蹤",
+            trackingSubtitle = "卡爾曼濾波器多目標追蹤",
+            confirmThresholdTitle = "確認閾值",
+            confirmThresholdHint = "連續檢測 N 幀後確認為有效目標",
+            vanishThresholdTitle = "消失閾值",
+            vanishThresholdHint = "丟失後預測 N 幀後刪除目標",
+            measureNoiseTitle = "測量雜訊 R",
+            measureNoiseHint = "值越大檢測框越平滑，但回應越慢",
+            vanishHeightRatioTitle = "消失高度比例",
+            vanishHeightRatioHint = "高度縮小超過此比例判定為消失",
+            stableBottomThresholdTitle = "消失底部閾值",
+            stableBottomThresholdHint = "底部位置變化小於此值視為穩定",
+            edgeMarginTitle = "邊緣檢測邊距",
+            edgeMarginHint = "距離邊緣小於此值視為邊緣目標",
+            aboutTitle = "關於",
+            aboutAuthor = "阿呆",
+            connectLabel = "連線",
+            disconnectLabel = "斷開",
+            connectedLabel = "已連線",
+            disconnectedLabel = "未連線",
+            connectedDeviceTitle = "已連線裝置",
+            currentDeviceTitle = "目前裝置",
+            deviceMonitorTestTitle = "裝置監控與測試",
+            noMouseButtonsPressedLabel = "未偵測到滑鼠按鍵按下",
+            pressedDetectedPrefix = "偵測到按下",
+            debugModeTitle = "調試模式",
+            parserDebugHint = "顯示解析來源與最近 RX 摘要",
+            safetyFallbackTitle = "安全回退",
+            safetyFallbackHint = "長按卡住時嘗試自動清零",
+            parseDebugPrefix = "解析調試",
+            protocolDebugPrefix = "協議調試",
+            drawSquareLabel = "畫正方形",
+            drawCircleLabel = "畫圓形",
+            trajectorySpeedTitle = "軌跡速度 (越快數值越小)",
+            mappingPrefix = "按鍵位映射",
+            calibrationButtonTitle = "按鍵位校準",
+            restoreDefaultLabel = "恢復預設",
+            pollButtonsLabel = "主動輪詢按鍵",
+            readyLabel = "準備就緒",
+            usbDiagnosticsTitle = "USB 診斷",
+            refreshLabel = "重新整理",
+            usbHostSupportedLabel = "USB Host: 支援",
+            otgHint = "部分手機需在設定中開啟 OTG 功能",
+            tapDeviceToConnectHint = "點擊裝置進行連線",
+            authorizedLabel = "已授權",
+            authorizeLabel = "授權",
+            kmboxConnectedLabel = "KMBOX 已連線",
+            kmboxDisconnectedLabel = "KMBOX 未連線",
+            kmboxConfigTitle = "KMBOX NET 設定",
+            deviceIpFieldLabel = "裝置 IP",
+            controlPortFieldLabel = "控制連接埠",
+            uuidFieldLabel = "UUID (8位十六進位)",
+            kmboxExampleHint = "範例：IP `192.168.2.188`，控制連接埠 `6234`，監聽連接埠建議 `6235`。",
+            hotkeySwitchSuffix = "開關",
+            enabledStateLabel = "已啟用",
+            disabledStateLabel = "已停用",
+            triggerButtonTitle = "觸發按鍵",
+            autoAimTitle = "自動瞄準",
+            targetSelectionModeTitle = "目標選擇模式",
+            modeRecentCrosshairLabel = "最近準星",
+            modeClassPriorityLabel = "類別優先",
+            aimCategoryTitle = "瞄準類別",
+            classPriorityTitle = "類別優先級",
+            classPriorityHint = "長按拖曳調整順序",
+            yOffsetTitle = "Y軸偏移",
+            yOffsetHint = "0%=頭 100%=腳",
+            autoFireTitle = "自動射擊",
+            fireRangeTitle = "射擊範圍 (px)",
+            initialDelayTitle = "初始延遲 (ms)",
+            minClickTitle = "最小點擊",
+            maxClickTitle = "最大點擊",
+            minIntervalTitle = "間隔最小 (ms)",
+            maxIntervalTitle = "間隔最大 (ms)",
+            burstIntervalTitle = "連射間隔 (ms)",
+            settingsTitle = "設定",
+            networkTitle = "網路設定",
+            networkSubtitle = "連接埠設定需與推流端一致",
+            udpPortLabel = "UDP 連接埠",
+            tcpPortLabel = "TCP 連接埠",
+            performanceTitle = "效能設定",
+            coreCountSuffix = "核心",
+            inferenceThreadsLabel = "推論執行緒數",
+            receiveFpsLabel = "接收幀率",
+            threadHint = "提示：執行緒數並非越多越好，建議依 CPU 大核心數量設定，預設 3-4 即可。",
+            receiveFpsHint = "限制接收幀率，超出部分丟棄，為推論節省效能開銷。",
+            appearanceTitle = "外觀設定",
+            dynamicColorTitle = "動態顏色",
+            dynamicColorSubtitle = "跟隨系統桌布配色",
+            languageTitle = "語言",
+            languageSubtitle = "目前會立即套用到設定頁與底部導覽標籤。",
+            bilibiliGuideTitle = "先去看看作者主頁",
+            bilibiliGuideBody = "這是首次啟動引導。你可以先跳轉到作者的 B站主頁，返回後再點擊下方按鈕繼續進入程式。",
+            bilibiliGuideOpenButton = "打開 B站主頁",
+            bilibiliGuideDismissButton = "稍後再說 / 繼續進入",
+            executionPathLabel = "執行路徑",
+            deviceSocLabel = "裝置 SoC",
+            deviceHardwareLabel = "硬體資訊",
+            mediatekDirectSdkLabel = "聯發科直連 SDK"
+        )
+    }
+}
+
+private fun AppTab.label(text: AppTextBundle): String {
+    return when (this) {
+        AppTab.Monitor -> text.tabMonitor
+        AppTab.Input -> text.tabInput
+        AppTab.Function -> text.tabFunction
+        AppTab.About -> text.tabAbout
+        AppTab.Settings -> text.tabSettings
+    }
+}
+
+private object DeviceRuntimeInfo {
+    private val cpuInfo: Map<String, String> by lazy {
+        runCatching {
+            File("/proc/cpuinfo").useLines { lines ->
+                lines.mapNotNull { line ->
+                    val separator = line.indexOf(':')
+                    if (separator <= 0) return@mapNotNull null
+                    val key = line.substring(0, separator).trim()
+                    val value = line.substring(separator + 1).trim()
+                    if (key.isBlank() || value.isBlank()) null else key to value
+                }.toMap()
+            }
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun cpuInfoValue(vararg keys: String): String {
+        for (key in keys) {
+            val exact = cpuInfo[key]
+            if (!exact.isNullOrBlank()) return exact
+            val ignoreCase = cpuInfo.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
+            if (!ignoreCase.isNullOrBlank()) return ignoreCase
+        }
+        return ""
+    }
+
+    private fun buildSocManufacturer(): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MANUFACTURER.orEmpty().trim()
+        } else {
+            ""
+        }
+    }
+
+    private fun buildSocModel(): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MODEL.orEmpty().trim()
+        } else {
+            ""
+        }
+    }
+
+    private fun normalize(value: String): String = value.trim().ifBlank { "unknown" }
+
+    fun isLikelyMediaTek(): Boolean {
+        val candidates = listOf(
+            buildSocManufacturer(),
+            buildSocModel(),
+            Build.HARDWARE.orEmpty(),
+            Build.BOARD.orEmpty(),
+            Build.DEVICE.orEmpty(),
+            Build.PRODUCT.orEmpty(),
+            cpuInfoValue("Hardware", "Model Name", "Processor", "vendor_id")
+        )
+        val haystack = candidates.joinToString(" ").lowercase(Locale.ROOT)
+        return "mediatek" in haystack || "dimensity" in haystack || Regex("""\bmt\d{4,}\b""").containsMatchIn(haystack)
+    }
+
+    fun socSummary(): String {
+        val manufacturer = buildSocManufacturer()
+        val socModel = buildSocModel()
+        val cpuHardware = cpuInfoValue("Hardware")
+        val cpuModel = cpuInfoValue("Model Name", "model name", "Processor")
+        val vendor = manufacturer.ifBlank {
+            if (isLikelyMediaTek()) "MediaTek" else Build.MANUFACTURER.orEmpty()
+        }
+        val model = listOf(socModel, cpuHardware, cpuModel).firstOrNull { it.isNotBlank() }.orEmpty()
+        return listOf(normalize(vendor), normalize(model)).joinToString(" | ")
+    }
+
+    fun hardwareSummary(): String {
+        val segments = buildList {
+            add("hw=${normalize(Build.HARDWARE.orEmpty())}")
+            add("board=${normalize(Build.BOARD.orEmpty())}")
+            add("device=${normalize(Build.DEVICE.orEmpty())}")
+            add("abis=${Build.SUPPORTED_ABIS.joinToString("/").ifBlank { "unknown" }}")
+        }
+        return segments.joinToString("  ")
+    }
+
+    fun deviceSummaryForLogs(): String {
+        return "manufacturer=${normalize(Build.MANUFACTURER.orEmpty())} model=${normalize(Build.MODEL.orEmpty())} android=${Build.VERSION.RELEASE}/${Build.VERSION.SDK_INT}"
+    }
+}
+
+private object MediaTekDirectSdkBridge {
+    private val candidateClasses = listOf(
+        "com.mediatek.neuropilot.Delegate",
+        "com.mediatek.neuropilot.nnapi.NnApiDelegate",
+        "com.mediatek.neuropilot.neuron.NeuronDelegate"
+    )
+
+    fun detectedClasses(): List<String> {
+        return candidateClasses.filter { className ->
+            runCatching { Class.forName(className) }.isSuccess
+        }
+    }
+
+    fun statusSummary(): String {
+        val classes = detectedClasses()
+        return when {
+            classes.isEmpty() -> "NeuroPilot AAR not bundled"
+            DeviceRuntimeInfo.isLikelyMediaTek() -> "NeuroPilot classes detected, but vendor runtime assets are still required"
+            else -> "NeuroPilot classes detected, but device is not recognized as MediaTek"
+        }
+    }
+
+    fun statusSummaryZhHans(): String {
+        val classes = detectedClasses()
+        return when {
+            classes.isEmpty() -> "未打包 NeuroPilot AAR，当前仍走 ONNX Runtime/NNAPI"
+            DeviceRuntimeInfo.isLikelyMediaTek() -> "已检测到 NeuroPilot 类，但仍需要厂商运行时资产"
+            else -> "已检测到 NeuroPilot 类，但当前设备不像联发科平台"
+        }
+    }
+
+    fun statusSummaryZhHant(): String {
+        val classes = detectedClasses()
+        return when {
+            classes.isEmpty() -> "未打包 NeuroPilot AAR，目前仍走 ONNX Runtime/NNAPI"
+            DeviceRuntimeInfo.isLikelyMediaTek() -> "已偵測到 NeuroPilot 類別，但仍需要廠商執行期資產"
+            else -> "已偵測到 NeuroPilot 類別，但目前裝置不像聯發科平台"
+        }
+    }
+
+    fun debugSummary(): String {
+        val classes = detectedClasses()
+        return if (classes.isEmpty()) {
+            "classes=none"
+        } else {
+            "classes=${classes.joinToString(",")}"
+        }
+    }
+}
+
+private fun mediaTekSdkStatusText(language: AppLanguage): String {
+    return when (language) {
+        AppLanguage.English -> MediaTekDirectSdkBridge.statusSummary()
+        AppLanguage.SimplifiedChinese -> MediaTekDirectSdkBridge.statusSummaryZhHans()
+        AppLanguage.TraditionalChinese -> MediaTekDirectSdkBridge.statusSummaryZhHant()
+    }
+}
+
+private fun isNoModelSelected(name: String): Boolean {
+    return name.isBlank() || name in setOf("未选择模型", "未選擇模型", "No model selected")
+}
+
+private fun isFailureStatus(status: String): Boolean {
+    val keywords = listOf("失败", "失敗", "异常", "異常", "failed", "exception", "error", "invalid", "denied")
+    return keywords.any { status.contains(it, ignoreCase = true) }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -399,6 +1415,9 @@ object OnnxEngine {
     @Volatile
     var activeExecutionProvider: String = "未加载"
         private set
+    @Volatile
+    var activeExecutionPath: String = "未加载"
+        private set
 
     val runtimeLogs: StateFlow<List<String>> = _runtimeLogs.asStateFlow()
 
@@ -434,6 +1453,7 @@ object OnnxEngine {
             sessionOptions = null
             env = null
             activeExecutionProvider = "未加载"
+            activeExecutionPath = "未加载"
             isInitialized = false
             outputName = ""
             lastStatus = "正在加载 ONNX..."
@@ -442,6 +1462,9 @@ object OnnxEngine {
                 "I",
                 "初始化模型 ${File(modelPath).name} threads=${threads.coerceIn(1, 8)} nnapi=${if (enableNnapi) "on" else "off"}"
             )
+            appendRuntimeLog("I", "设备 ${DeviceRuntimeInfo.deviceSummaryForLogs()}")
+            appendRuntimeLog("I", "SoC ${DeviceRuntimeInfo.socSummary()} | ${DeviceRuntimeInfo.hardwareSummary()}")
+            appendRuntimeLog("I", "MediaTek SDK ${MediaTekDirectSdkBridge.statusSummaryZhHans()} ${MediaTekDirectSdkBridge.debugSummary()}")
 
             val initResult = runCatching {
                 val e = OrtEnvironment.getEnvironment()
@@ -493,6 +1516,7 @@ object OnnxEngine {
                 session = s
                 sessionOptions = init.options
                 activeExecutionProvider = init.providerLabel
+                activeExecutionPath = describeExecutionPath(init.providerLabel, init.providerNote)
                 isInitialized = true
                 val outputShape = runCatching {
                     val info = s.outputInfo[outputName]?.info as? ai.onnxruntime.TensorInfo
@@ -506,9 +1530,9 @@ object OnnxEngine {
                     }
                 }
                 lastStatus = if (outputShape.isNullOrBlank()) {
-                    "ONNX 已加载: $providerSuffix in=${inputW}x$inputH c=$inputChannels ${if (inputNchw) "NCHW" else "NHWC"} ${inputType.name.lowercase(Locale.ROOT)} out=$outputName:${outputType.name.lowercase(Locale.ROOT)}"
+                    "ONNX 已加载: $providerSuffix path=$activeExecutionPath in=${inputW}x$inputH c=$inputChannels ${if (inputNchw) "NCHW" else "NHWC"} ${inputType.name.lowercase(Locale.ROOT)} out=$outputName:${outputType.name.lowercase(Locale.ROOT)}"
                 } else {
-                    "ONNX 已加载: $providerSuffix in=${inputW}x$inputH c=$inputChannels ${if (inputNchw) "NCHW" else "NHWC"} ${inputType.name.lowercase(Locale.ROOT)} out=$outputName:${outputType.name.lowercase(Locale.ROOT)}($outputShape)"
+                    "ONNX 已加载: $providerSuffix path=$activeExecutionPath in=${inputW}x$inputH c=$inputChannels ${if (inputNchw) "NCHW" else "NHWC"} ${inputType.name.lowercase(Locale.ROOT)} out=$outputName:${outputType.name.lowercase(Locale.ROOT)}($outputShape)"
                 }
                 appendRuntimeLog("I", lastStatus)
             }
@@ -608,6 +1632,7 @@ object OnnxEngine {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
         }
         return try {
+            appendRuntimeLog("D", "创建会话 threads=${threads.coerceIn(1, 8)} opt=ALL_OPT model=${File(modelPath).name}")
             configureProvider(options)
             SessionInitResult(
                 session = environment.createSession(modelPath, options),
@@ -634,23 +1659,40 @@ object OnnxEngine {
         return error?.message?.take(80)?.ifBlank { null } ?: "unknown"
     }
 
+    private fun describeExecutionPath(providerLabel: String, providerNote: String?): String {
+        return when {
+            providerLabel.equals("NNAPI", ignoreCase = true) && providerNote == "accelerator-only" -> "accelerator-only"
+            providerLabel.equals("NNAPI", ignoreCase = true) -> "standard NNAPI"
+            providerLabel.equals("CPU", ignoreCase = true) && providerNote?.startsWith("fallback") == true -> "CPU fallback"
+            providerLabel.equals("CPU", ignoreCase = true) && providerNote == "manual cpu-only" -> "manual CPU only"
+            providerLabel.equals("CPU", ignoreCase = true) -> "CPU"
+            else -> providerLabel.ifBlank { "未加载" }
+        }
+    }
+
     fun detect(bitmap: Bitmap, confThreshold: Float, nmsThreshold: Float): List<DetectionBox> {
         val localSession = synchronized(lock) { session } ?: return emptyList()
         val localEnv = synchronized(lock) { env } ?: return emptyList()
         val dstW = inputW.coerceAtLeast(1)
         val dstH = inputH.coerceAtLeast(1)
+        val totalStartNs = System.nanoTime()
 
         val scaled = Bitmap.createScaledBitmap(bitmap, dstW, dstH, true)
         return try {
+            val preprocessStartNs = System.nanoTime()
             val area = dstW * dstH
             val pixels = IntArray(area)
             scaled.getPixels(pixels, 0, dstW, 0, 0, dstW, dstH)
             val lumaStats = sampleLumaStats(pixels, dstW, dstH)
             val tensor = createInputTensor(localEnv, pixels, dstW, dstH)
+            val preprocessMs = (System.nanoTime() - preprocessStartNs) / 1_000_000.0
 
             var result: OrtSession.Result? = null
             try {
+                val inferenceStartNs = System.nanoTime()
                 result = localSession.run(mapOf(inputName to tensor))
+                val inferenceMs = (System.nanoTime() - inferenceStartNs) / 1_000_000.0
+                val postprocessStartNs = System.nanoTime()
                 val outputValue = result.get(0).value
                 val modelBoxes = parseOutput(outputValue, confThreshold)
                 val scaledBoxes = scaleAndClipBoxes(
@@ -679,11 +1721,13 @@ object OnnxEngine {
                     bitmapW = bitmap.width,
                     bitmapH = bitmap.height
                 )
-                lastStatus = "ONNX 推理完成: raw=${scaledBoxes.size} filtered=${filtered.size} out=${suppressed.size}"
+                val postprocessMs = (System.nanoTime() - postprocessStartNs) / 1_000_000.0
+                val totalMs = (System.nanoTime() - totalStartNs) / 1_000_000.0
+                lastStatus = "ONNX 推理完成: total=${"%.1f".format(Locale.ROOT, totalMs)}ms prep=${"%.1f".format(Locale.ROOT, preprocessMs)}ms run=${"%.1f".format(Locale.ROOT, inferenceMs)}ms post=${"%.1f".format(Locale.ROOT, postprocessMs)}ms raw=${scaledBoxes.size} filtered=${filtered.size} out=${suppressed.size}"
                 val now = System.currentTimeMillis()
                 if (now - lastInferenceLogAtMs >= ONNX_INFERENCE_LOG_INTERVAL_MS) {
                     lastInferenceLogAtMs = now
-                    appendRuntimeLog("D", "${lastStatus} ep=$activeExecutionProvider")
+                    appendRuntimeLog("D", "${lastStatus} ep=$activeExecutionProvider path=$activeExecutionPath input=${bitmap.width}x${bitmap.height}")
                 }
                 suppressed
             } finally {
@@ -2789,6 +3833,34 @@ object TrackingRuntimeStats {
     @Volatile var targetCount: Int = 0
 }
 
+object InferenceRuntimeStats {
+    private val inferenceCounter = AtomicLong(0)
+    private val inferenceFps = AtomicLong(0)
+    @Volatile private var lastTickMs = System.currentTimeMillis()
+
+    fun markInferenceComplete() {
+        inferenceCounter.incrementAndGet()
+    }
+
+    fun snapshotFps(nowMs: Long = System.currentTimeMillis()): Int {
+        tick(nowMs)
+        return inferenceFps.get().toInt()
+    }
+
+    fun reset() {
+        inferenceCounter.set(0)
+        inferenceFps.set(0)
+        lastTickMs = System.currentTimeMillis()
+    }
+
+    private fun tick(nowMs: Long) {
+        if (nowMs - lastTickMs >= 1000L) {
+            inferenceFps.set(inferenceCounter.getAndSet(0))
+            lastTickMs = nowMs
+        }
+    }
+}
+
 data class DetectionBox(
     val x: Float,
     val y: Float,
@@ -2992,6 +4064,7 @@ object ReceiverEngine {
         bps.set(0)
         resetLimitWindow()
         resetLatencyStats()
+        InferenceRuntimeStats.reset()
     }
 
     fun setPerformance(threadCount: Int, maxReceiveFps: Int) {
@@ -3008,6 +4081,7 @@ object ReceiverEngine {
             connected = connected,
             protocol = if (useUdp) "UDP" else "TCP",
             receiveFps = pps.get().toInt(),
+            inferenceFps = InferenceRuntimeStats.snapshotFps(now),
             bytesPerSec = bps.get(),
             targetCount = TrackingRuntimeStats.targetCount,
             latencyMs = estimateLatencyMs(now)
@@ -3020,6 +4094,7 @@ object ReceiverEngine {
         receiverJob?.cancel()
         closeSockets()
         resetLatencyStats()
+        InferenceRuntimeStats.reset()
         receiverJob = scope.launch {
             if (useUdp) receiveUdpLoop() else receiveTcpLoop()
         }
@@ -3299,32 +4374,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                                 val detections = mutableListOf<DetectionBox>()
                                 val rawDetections = when (RuntimeBridge.selectedModelKind) {
                                     ModelKind.ONNX -> {
-                                        OnnxEngine.detect(
-                                            bitmap = bmp,
-                                            confThreshold = RuntimeBridge.confidence,
-                                            nmsThreshold = RuntimeBridge.nms
-                                        )
-                                    }
-                                    ModelKind.NCNN -> {
-                                        NcnnEngine.safeDetect(bmp)?.map { obj ->
-                                            DetectionBox(
-                                                x = obj.x,
-                                                y = obj.y,
-                                                w = obj.w,
-                                                h = obj.h,
-                                                label = obj.label,
-                                                score = obj.prob
-                                            )
-                                        }.orEmpty()
-                                    }
-                                    else -> {
                                         if (OnnxEngine.isInitialized) {
                                             OnnxEngine.detect(
                                                 bitmap = bmp,
                                                 confThreshold = RuntimeBridge.confidence,
                                                 nmsThreshold = RuntimeBridge.nms
-                                            )
+                                            ).also {
+                                                InferenceRuntimeStats.markInferenceComplete()
+                                            }
                                         } else {
+                                            emptyList()
+                                        }
+                                    }
+                                    ModelKind.NCNN -> {
+                                        if (NcnnEngine.isLoaded && NcnnEngine.isInitialized) {
                                             NcnnEngine.safeDetect(bmp)?.map { obj ->
                                                 DetectionBox(
                                                     x = obj.x,
@@ -3334,7 +4397,39 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                                                     label = obj.label,
                                                     score = obj.prob
                                                 )
-                                            }.orEmpty()
+                                            }.orEmpty().also {
+                                                InferenceRuntimeStats.markInferenceComplete()
+                                            }
+                                        } else {
+                                            emptyList()
+                                        }
+                                    }
+                                    else -> {
+                                        if (OnnxEngine.isInitialized) {
+                                            OnnxEngine.detect(
+                                                bitmap = bmp,
+                                                confThreshold = RuntimeBridge.confidence,
+                                                nmsThreshold = RuntimeBridge.nms
+                                            ).also {
+                                                InferenceRuntimeStats.markInferenceComplete()
+                                            }
+                                        } else {
+                                            if (NcnnEngine.isLoaded && NcnnEngine.isInitialized) {
+                                                NcnnEngine.safeDetect(bmp)?.map { obj ->
+                                                    DetectionBox(
+                                                        x = obj.x,
+                                                        y = obj.y,
+                                                        w = obj.w,
+                                                        h = obj.h,
+                                                        label = obj.label,
+                                                        score = obj.prob
+                                                    )
+                                                }.orEmpty().also {
+                                                    InferenceRuntimeStats.markInferenceComplete()
+                                                }
+                                            } else {
+                                                emptyList()
+                                            }
                                         }
                                     }
                                 }
@@ -3590,11 +4685,12 @@ fun MainApp() {
     var tcpPort by rememberSaveable { mutableStateOf("7878") }
     var confidence by rememberSaveable { mutableStateOf(0.25f) }
     var nms by rememberSaveable { mutableStateOf(0.45f) }
-    var selectedModel by rememberSaveable { mutableStateOf("未选择模型") }
+    var selectedModel by rememberSaveable { mutableStateOf("") }
     var onnxNnapiEnabled by rememberSaveable { mutableStateOf(true) }
     var inferenceThreads by rememberSaveable { mutableStateOf(4) }
     var receiveFps by rememberSaveable { mutableStateOf(240) }
     var dynamicColor by rememberSaveable { mutableStateOf(false) }
+    var appLanguage by rememberSaveable { mutableStateOf(detectSystemLanguage()) }
     var aimRangeEnabled by rememberSaveable { mutableStateOf(true) }
     var aimRangePercent by rememberSaveable { mutableStateOf(50f) }
     var showLabelTag by rememberSaveable { mutableStateOf(true) }
@@ -3624,6 +4720,8 @@ fun MainApp() {
     var kmboxPort by rememberSaveable { mutableStateOf(KMBOX_NET_DEFAULT_PORT.toString()) }
     var kmboxUuid by rememberSaveable { mutableStateOf("") }
     var kmboxMonitorPort by rememberSaveable { mutableStateOf(KMBOX_NET_DEFAULT_MONITOR_PORT.toString()) }
+    var showBilibiliGuide by rememberSaveable { mutableStateOf(false) }
+    val text = appTextBundle(appLanguage)
 
     val modelOptions = remember { mutableStateListOf<ModelEntry>() }
     val onnxRuntimeLogs by OnnxEngine.runtimeLogs.collectAsState()
@@ -3641,7 +4739,7 @@ fun MainApp() {
         modelOptions.clear()
         modelOptions.addAll(scanModelEntries(context))
         if (modelOptions.none { it.name == selectedModel }) {
-            selectedModel = modelOptions.firstOrNull()?.name ?: "未选择模型"
+            selectedModel = modelOptions.firstOrNull()?.name.orEmpty()
         }
     }
 
@@ -3691,6 +4789,7 @@ fun MainApp() {
         put("inferenceThreads", inferenceThreads)
         put("receiveFps", receiveFps)
         put("dynamicColor", dynamicColor)
+        put("appLanguage", appLanguage.code)
         put("aimRangeEnabled", aimRangeEnabled)
         put("aimRangePercent", aimRangePercent.toDouble())
         put("showLabelTag", showLabelTag)
@@ -3735,6 +4834,7 @@ fun MainApp() {
         inferenceThreads = root.optInt("inferenceThreads", 4).coerceIn(1, cores)
         receiveFps = root.optInt("receiveFps", 240).coerceIn(30, 240)
         dynamicColor = root.optBoolean("dynamicColor", false)
+        appLanguage = AppLanguage.fromCode(root.optString("appLanguage", appLanguage.code))
         aimRangeEnabled = root.optBoolean("aimRangeEnabled", true)
         aimRangePercent = root.optDouble("aimRangePercent", 50.0).toFloat().coerceIn(0f, 100f)
         showLabelTag = root.optBoolean("showLabelTag", true)
@@ -3833,6 +4933,7 @@ fun MainApp() {
         } else {
             refreshModels()
         }
+        showBilibiliGuide = !prefs.getBoolean(BILIBILI_GUIDE_DISMISSED_KEY, false)
         autoConfigLoaded = true
     }
 
@@ -3928,7 +5029,7 @@ fun MainApp() {
     }
     LaunchedEffect(autoConfigLoaded, selectedModel, modelOptions.map { it.name }) {
         if (!autoConfigLoaded) return@LaunchedEffect
-        if (selectedModel.isBlank() || selectedModel == "未选择模型") return@LaunchedEffect
+        if (isNoModelSelected(selectedModel)) return@LaunchedEffect
         initModelIfNeeded(selectedModel, silent = true)
     }
     LaunchedEffect(autoConfigLoaded, inferenceThreads, onnxNnapiEnabled) {
@@ -3948,11 +5049,12 @@ fun MainApp() {
             bottomBar = {
                 NavigationBar(containerColor = Color.White) {
                     AppTab.entries.forEach { tab ->
+                        val label = tab.label(text)
                         NavigationBarItem(
                             selected = currentTab == tab,
                             onClick = { currentTab = tab },
-                            icon = { Icon(tab.icon, tab.label) },
-                            label = { Text(tab.label, fontSize = 10.sp) },
+                            icon = { Icon(tab.icon, label) },
+                            label = { Text(label, fontSize = 10.sp) },
                             colors = NavigationBarItemDefaults.colors(indicatorColor = Color(0xFFEEEEEE))
                         )
                     }
@@ -3962,6 +5064,7 @@ fun MainApp() {
             Box(Modifier.fillMaxSize().padding(innerPadding).background(Color(0xFFF5F5F5))) {
                 when (currentTab) {
                     AppTab.Monitor -> MonitorScreen(
+                        text = text,
                         running = running,
                         stats = stats,
                         isUdp = isUdp,
@@ -3990,6 +5093,7 @@ fun MainApp() {
                         onImportConfig = { importConfigLauncher.launch(arrayOf("application/json", "text/plain")) }
                     )
                     AppTab.Input -> InputControlScreen(
+                        text = text,
                         hotkeys = hotkeys,
                         aimRangeEnabled = aimRangeEnabled,
                         aimRangePercent = aimRangePercent,
@@ -4038,6 +5142,7 @@ fun MainApp() {
                         onKmboxMonitorPortChange = { kmboxMonitorPort = filterIntInput(it) }
                     )
                     AppTab.Function -> FunctionScreen(
+                        text = text,
                         trackingEnabled = trackingEnabled,
                         confirmThreshold = trackingConfirmThreshold,
                         vanishThreshold = trackingVanishThreshold,
@@ -4053,18 +5158,37 @@ fun MainApp() {
                         onStableBottomThresholdChange = { trackingStableBottomThreshold = it },
                         onEdgeMarginChange = { trackingEdgeMargin = it }
                     )
-                    AppTab.About -> AboutScreen()
+                    AppTab.About -> AboutScreen(text = text)
                     AppTab.Settings -> SettingsScreen(
+                        text = text,
+                        selectedLanguage = appLanguage,
                         udpPort = udpPort,
                         tcpPort = tcpPort,
                         inferenceThreads = inferenceThreads,
                         receiveFps = receiveFps,
                         dynamicColor = dynamicColor,
+                        onLanguageChange = { appLanguage = it },
                         onUdpPort = { udpPort = it.filter(Char::isDigit) },
                         onTcpPort = { tcpPort = it.filter(Char::isDigit) },
                         onInferenceThreadsChange = { inferenceThreads = it },
                         onReceiveFpsChange = { receiveFps = it },
                         onDynamicColorChange = { dynamicColor = it }
+                    )
+                }
+                if (showBilibiliGuide) {
+                    BilibiliGuideOverlay(
+                        text = text,
+                        onOpenHomepage = {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(BILIBILI_SPACE_URL))
+                            runCatching { context.startActivity(intent) }
+                                .onFailure {
+                                    Toast.makeText(context, "无法打开链接", Toast.LENGTH_SHORT).show()
+                                }
+                        },
+                        onDismiss = {
+                            showBilibiliGuide = false
+                            prefs.edit().putBoolean(BILIBILI_GUIDE_DISMISSED_KEY, true).apply()
+                        }
                     )
                 }
             }
@@ -4073,7 +5197,84 @@ fun MainApp() {
 }
 
 @Composable
-fun MonitorScreen(
+private fun BilibiliGuideOverlay(
+    text: AppTextBundle,
+    onOpenHomepage: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xB3000000))
+            .zIndex(20f),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier
+                .padding(horizontal = 24.dp)
+                .fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 22.dp, vertical = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text.bilibiliGuideTitle,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF242424)
+                )
+                Text(
+                    text.bilibiliGuideBody,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp,
+                    color = Color(0xFF5C5C5C)
+                )
+                Surface(
+                    color = Color(0xFFF7F7F7),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, Color(0xFFE6E6E6))
+                ) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                        Text("Bilibili", fontSize = 12.sp, color = Color(0xFF8A8A8A), fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            BILIBILI_SPACE_URL,
+                            fontSize = 13.sp,
+                            color = Color(0xFF2F5D91)
+                        )
+                    }
+                }
+                Button(
+                    onClick = onOpenHomepage,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFFB7299),
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text(text.bilibiliGuideOpenButton, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, Color(0xFFD0D0D0)),
+                    colors = ButtonDefaults.outlinedButtonColors(containerColor = Color(0xFFF9F9F9))
+                ) {
+                    Text(text.bilibiliGuideDismissButton, fontSize = 15.sp, color = Color(0xFF555555))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MonitorScreen(
+    text: AppTextBundle,
     running: Boolean,
     stats: StreamStats,
     isUdp: Boolean,
@@ -4112,6 +5313,9 @@ fun MonitorScreen(
         inactiveTrackColor = Color(0xFFE2E2E2)
     )
     val localIp = remember { NetworkUtils.getLocalIpAddress() }
+    val deviceSocSummary = remember { DeviceRuntimeInfo.socSummary() }
+    val deviceHardwareSummary = remember { DeviceRuntimeInfo.hardwareSummary() }
+    val mediaTekSdkStatus = remember(text.language) { mediaTekSdkStatusText(text.language) }
 
     Column(
         Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 10.dp).verticalScroll(rememberScrollState()),
@@ -4122,8 +5326,8 @@ fun MonitorScreen(
             Box {
                 IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Default.MoreVert, null) }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    DropdownMenuItem(text = { Text("导出配置") }, leadingIcon = { Icon(Icons.Default.ArrowUpward, null) }, onClick = { menuExpanded = false; onExportConfig() })
-                    DropdownMenuItem(text = { Text("导入配置") }, leadingIcon = { Icon(Icons.Default.ArrowDownward, null) }, onClick = { menuExpanded = false; onImportConfig() })
+                    DropdownMenuItem(text = { Text(text.exportConfigLabel) }, leadingIcon = { Icon(Icons.Default.ArrowUpward, null) }, onClick = { menuExpanded = false; onExportConfig() })
+                    DropdownMenuItem(text = { Text(text.importConfigLabel) }, leadingIcon = { Icon(Icons.Default.ArrowDownward, null) }, onClick = { menuExpanded = false; onImportConfig() })
                 }
             }
         }
@@ -4137,8 +5341,8 @@ fun MonitorScreen(
                 Spacer(Modifier.width(14.dp))
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(if (running) "工作中" else "待机中", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        runtimeBackendBadges().forEach { badge ->
+                        Text(if (running) text.runningStatusLabel else text.idleStatusLabel, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        runtimeBackendBadges(text).forEach { badge ->
                             ExecutionBackendBadge(
                                 label = badge.label,
                                 containerColor = badge.containerColor,
@@ -4146,11 +5350,11 @@ fun MonitorScreen(
                             )
                         }
                     }
-                    Text("版本: $APP_VERSION", color = Color(0xFF555555), fontSize = 12.sp)
-                    Text("接收: ${stats.receiveFps} fps", color = Color(0xFF555555), fontSize = 12.sp)
-                    Text("推理: ${if (running) stats.receiveFps else 0} fps", color = Color(0xFF555555), fontSize = 12.sp)
-                    Text("延迟: ${stats.latencyMs}ms", color = Color(0xFF555555), fontSize = 12.sp)
-                    Text("目标数: ${stats.targetCount}", color = Color(0xFF555555), fontSize = 12.sp)
+                    Text("${text.versionLabel}: $APP_VERSION", color = Color(0xFF555555), fontSize = 12.sp)
+                    Text("${text.receiveLabel}: ${stats.receiveFps} fps", color = Color(0xFF555555), fontSize = 12.sp)
+                    Text("${text.inferenceLabel}: ${if (running) stats.inferenceFps else 0} fps", color = Color(0xFF555555), fontSize = 12.sp)
+                    Text("${text.latencyLabel}: ${stats.latencyMs}ms", color = Color(0xFF555555), fontSize = 12.sp)
+                    Text("${text.targetCountLabel}: ${stats.targetCount}", color = Color(0xFF555555), fontSize = 12.sp)
                 }
             }
         }
@@ -4161,8 +5365,8 @@ fun MonitorScreen(
             ) {
                 if (running) AndroidView(factory = { GameSurfaceView(it) }, modifier = Modifier.fillMaxSize())
                 else Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("已停止", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-                    Text("等待启动", color = Color(0xFFCCCCCC), fontSize = 14.sp)
+                    Text(text.stoppedLabel, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    Text(text.waitingToStartLabel, color = Color(0xFFCCCCCC), fontSize = 14.sp)
                 }
             }
 
@@ -4179,7 +5383,7 @@ fun MonitorScreen(
                         modifier = Modifier.weight(1f)
                     ) { onShowConfidencePercentChange(!showConfidencePercent) }
                 }
-                val modelSummary = currentModelParameterSummary(selectedModel)
+                val modelSummary = currentModelParameterSummary(selectedModel, text)
                 Column(
                     modifier = Modifier.fillMaxWidth().height(38.dp),
                     horizontalAlignment = Alignment.End,
@@ -4209,11 +5413,11 @@ fun MonitorScreen(
                     if (running) {
                         Text("X", fontSize = 14.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(6.dp))
-                        Text("停止", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text(text.stopLabel, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     } else {
                         Icon(Icons.Default.PlayArrow, null)
                         Spacer(Modifier.width(4.dp))
-                        Text("启动推理", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text(text.startInferenceLabel, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -4225,7 +5429,7 @@ fun MonitorScreen(
         ) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("模型选择", fontWeight = FontWeight.Bold, color = Color(0xFF666666), fontSize = 14.sp)
+                    Text(text.modelSelectionTitle, fontWeight = FontWeight.Bold, color = Color(0xFF666666), fontSize = 14.sp)
                     OutlinedButton(
                         onClick = onImportModel,
                         modifier = Modifier.width(62.dp).height(34.dp),
@@ -4239,12 +5443,12 @@ fun MonitorScreen(
                 }
                 Box {
                     OutlinedTextField(
-                        value = selectedModel,
+                        value = if (isNoModelSelected(selectedModel)) text.noModelSelectedLabel else selectedModel,
                         onValueChange = {},
                         readOnly = true,
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("模型选项框") }
+                        label = { Text(text.modelOptionsBoxLabel) }
                     )
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         IconButton(onClick = { modelExpanded = !modelExpanded }) {
@@ -4257,7 +5461,7 @@ fun MonitorScreen(
                     }
                     DropdownMenu(expanded = modelExpanded, onDismissRequest = { modelExpanded = false }) {
                         if (modelNames.isEmpty()) {
-                            DropdownMenuItem(text = { Text("暂无模型，请先导入") }, onClick = { modelExpanded = false })
+                            DropdownMenuItem(text = { Text(text.noModelsHint) }, onClick = { modelExpanded = false })
                         } else {
                             modelNames.forEach { name ->
                                 DropdownMenuItem(text = { Text(name) }, onClick = { modelExpanded = false; onSelectModel(name) })
@@ -4265,16 +5469,16 @@ fun MonitorScreen(
                         }
                     }
                 }
-                Text("支持: .param/.bin (NCNN), .onnx (YOLOv8/v11/INT8)", fontSize = 12.sp, color = Color.Gray)
+                Text(text.modelSupportHint, fontSize = 12.sp, color = Color.Gray)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("NNAPI 加速", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF4C4C4C))
+                        Text(text.nnapiAccelerationTitle, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF4C4C4C))
                         Text(
-                            if (onnxNnapiEnabled) "开启后优先尝试 NNAPI/NPU，不支持时自动回退 CPU" else "已固定使用 CPU 推理",
+                            if (onnxNnapiEnabled) text.nnapiEnabledHint else text.nnapiDisabledHint,
                             fontSize = 11.sp,
                             color = Color(0xFF7A7A7A)
                         )
@@ -4285,8 +5489,12 @@ fun MonitorScreen(
                         enabled = !running
                     )
                 }
-                Text("当前后端: ${OnnxEngine.activeExecutionProvider}", fontSize = 11.sp, color = Color(0xFF6A6A6A))
-                Text("ONNX 状态: ${OnnxEngine.lastStatus}", fontSize = 11.sp, color = Color(0xFF6A6A6A))
+                Text("${text.currentBackendLabel}: ${OnnxEngine.activeExecutionProvider}", fontSize = 11.sp, color = Color(0xFF6A6A6A))
+                Text("${text.executionPathLabel}: ${OnnxEngine.activeExecutionPath}", fontSize = 11.sp, color = Color(0xFF6A6A6A))
+                Text("${text.onnxStatusLabel}: ${OnnxEngine.lastStatus}", fontSize = 11.sp, color = Color(0xFF6A6A6A))
+                Text("${text.deviceSocLabel}: $deviceSocSummary", fontSize = 11.sp, color = Color(0xFF6A6A6A))
+                Text("${text.deviceHardwareLabel}: $deviceHardwareSummary", fontSize = 11.sp, color = Color(0xFF6A6A6A))
+                Text("${text.mediatekDirectSdkLabel}: $mediaTekSdkStatus", fontSize = 11.sp, color = Color(0xFF6A6A6A))
             }
         }
 
@@ -4301,12 +5509,12 @@ fun MonitorScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("ONNX 运行日志", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF555555))
-                        Text("最近 ${onnxRuntimeLogs.size} 条，会同步写入 Logcat/$ONNX_LOG_TAG", fontSize = 11.sp, color = Color(0xFF7A7A7A))
+                        Text(text.onnxRuntimeLogsTitle, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF555555))
+                        Text(text.recentLogsSummary(onnxRuntimeLogs.size), fontSize = 11.sp, color = Color(0xFF7A7A7A))
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = onClearOnnxLogs, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
-                            Text("清空", fontSize = 12.sp)
+                            Text(text.clearLabel, fontSize = 12.sp)
                         }
                         IconButton(onClick = { runtimeLogExpanded = !runtimeLogExpanded }, modifier = Modifier.size(28.dp)) {
                             Icon(
@@ -4325,7 +5533,7 @@ fun MonitorScreen(
                     Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         val visibleLogs = onnxRuntimeLogs.asReversed().take(if (runtimeLogExpanded) 12 else 5)
                         if (visibleLogs.isEmpty()) {
-                            Text("暂无运行日志", color = Color(0xFFBFC6CF), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            Text(text.noRuntimeLogsLabel, color = Color(0xFFBFC6CF), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         } else {
                             visibleLogs.forEach { line ->
                                 Text(
@@ -4350,10 +5558,10 @@ fun MonitorScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Settings, null, tint = Color(0xFF666666), modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("检测参数", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF555555))
+                        Text(text.detectionParametersTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF555555))
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("置信 ${"%.2f".format(confidence)} | NMS ${"%.2f".format(nms)}", color = Color(0xFF666666), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text("${text.confidenceThresholdTitle} ${"%.2f".format(confidence)} | NMS ${"%.2f".format(nms)}", color = Color(0xFF666666), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         IconButton(onClick = { detectExpanded = !detectExpanded }, modifier = Modifier.size(28.dp)) {
                             Icon(
                                 if (detectExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
@@ -4366,7 +5574,7 @@ fun MonitorScreen(
                 AnimatedVisibility(visible = detectExpanded, enter = expandVertically(), exit = shrinkVertically()) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("置信度阈值", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                            Text(text.confidenceThresholdTitle, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                             Text("%.2f".format(confidence), fontWeight = FontWeight.Bold, color = Color(0xFF666666), fontSize = 22.sp)
                         }
                         Slider(
@@ -4376,7 +5584,7 @@ fun MonitorScreen(
                             colors = sliderColors
                         )
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("NMS 阈值", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                            Text(text.nmsThresholdTitle, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                             Text("%.2f".format(nms), fontWeight = FontWeight.Bold, color = Color(0xFF666666), fontSize = 22.sp)
                         }
                         Slider(
@@ -4390,7 +5598,7 @@ fun MonitorScreen(
             }
         }
 
-        Text("传输协议", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Text(text.transportProtocolTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(26.dp),
@@ -4417,14 +5625,14 @@ fun MonitorScreen(
             shape = RoundedCornerShape(16.dp)
         ) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("画面传输配置", color = Color(0xFF8A8A8A), fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text("请在电脑端运行HX模拟副机专用TCP推流器", color = Color(0xFF666666), fontSize = 12.sp)
+                Text(text.streamConfigTitle, color = Color(0xFF8A8A8A), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(text.streamConfigHint, color = Color(0xFF666666), fontSize = 12.sp)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                    Text("本机 IP", color = Color(0xFF444444), fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(text.localIpLabel, color = Color(0xFF444444), fontSize = 16.sp, fontWeight = FontWeight.Medium)
                     Text(localIp, color = Color(0xFF555555), fontWeight = FontWeight.Bold, fontSize = 28.sp)
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                    Text("监听端口", color = Color(0xFF444444), fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(text.listenPortLabel, color = Color(0xFF444444), fontSize = 16.sp, fontWeight = FontWeight.Medium)
                     Text(activePort.toString(), color = Color(0xFF555555), fontWeight = FontWeight.Bold, fontSize = 28.sp)
                 }
             }
@@ -4444,12 +5652,12 @@ private data class ModelParameterSummary(
 )
 
 @Composable
-private fun runtimeBackendBadges(): List<BackendBadgeSpec> {
+private fun runtimeBackendBadges(text: AppTextBundle): List<BackendBadgeSpec> {
     return when (RuntimeBridge.selectedModelKind) {
         ModelKind.ONNX -> listOf(
             BackendBadgeSpec(label = "ONNX", containerColor = Color(0xFF6E737A)),
             BackendBadgeSpec(
-                label = OnnxEngine.activeExecutionProvider.ifBlank { "未加载" },
+                label = OnnxEngine.activeExecutionProvider.ifBlank { text.noModelLoadedLabel },
                 containerColor = when (OnnxEngine.activeExecutionProvider.uppercase(Locale.ROOT)) {
                     "NNAPI" -> Color(0xFF2E7D32)
                     "CPU" -> Color(0xFF616161)
@@ -4462,12 +5670,12 @@ private fun runtimeBackendBadges(): List<BackendBadgeSpec> {
             BackendBadgeSpec(label = "NATIVE", containerColor = Color(0xFF546E7A))
         )
         ModelKind.FILE -> listOf(
-            BackendBadgeSpec(label = "未加载模型", containerColor = Color(0xFF8A8A8A))
+            BackendBadgeSpec(label = text.noModelLoadedLabel, containerColor = Color(0xFF8A8A8A))
         )
     }
 }
 
-private fun currentModelParameterSummary(selectedModel: String): ModelParameterSummary {
+private fun currentModelParameterSummary(selectedModel: String, text: AppTextBundle): ModelParameterSummary {
     return when (RuntimeBridge.selectedModelKind) {
         ModelKind.ONNX -> ModelParameterSummary(
             headline = OnnxEngine.modelInputResolutionLabel(),
@@ -4479,13 +5687,13 @@ private fun currentModelParameterSummary(selectedModel: String): ModelParameterS
             }
             ModelParameterSummary(
                 headline = loadedName,
-                detail = if (NcnnEngine.isInitialized) "PARAM/BIN | NATIVE" else "等待加载 NCNN"
+                detail = if (NcnnEngine.isInitialized) "PARAM/BIN | NATIVE" else text.waitingLoadNcnnLabel
             )
         }
         ModelKind.FILE -> ModelParameterSummary(
-            headline = "未加载模型",
-            detail = if (selectedModel.isBlank() || selectedModel == "未选择模型") {
-                "请选择模型"
+            headline = text.noModelLoadedLabel,
+            detail = if (isNoModelSelected(selectedModel)) {
+                text.selectModelPromptLabel
             } else {
                 selectedModel
             }
@@ -4579,7 +5787,8 @@ private fun ProtocolSegmentButton(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun InputControlScreen(
+private fun InputControlScreen(
+    text: AppTextBundle,
     hotkeys: List<HotkeyConfig>,
     aimRangeEnabled: Boolean,
     aimRangePercent: Float,
@@ -4623,12 +5832,18 @@ fun InputControlScreen(
     onKmboxUuidChange: (String) -> Unit,
     onKmboxMonitorPortChange: (String) -> Unit
 ) {
-    val tabs = listOf("设备连接", "热键1", "热键2", "热键3", "控制参数")
+    val tabs = listOf(
+        text.deviceConnectionTab,
+        text.hotkeyName(1),
+        text.hotkeyName(2),
+        text.hotkeyName(3),
+        text.controlParametersTab
+    )
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize()) {
-        Text("输入控制", fontSize = 32.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 8.dp))
+        Text(text.inputControlTitle, fontSize = 32.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 8.dp))
         TabRow(
             selectedTabIndex = pagerState.currentPage,
             containerColor = Color(0xFFF5F5F5),
@@ -4670,6 +5885,7 @@ fun InputControlScreen(
             ) {
                 when (page) {
                     0 -> DeviceConnectTab(
+                        text = text,
                         selectedInputBackend = selectedInputBackend,
                         kmboxIp = kmboxIp,
                         kmboxPort = kmboxPort,
@@ -4687,12 +5903,14 @@ fun InputControlScreen(
                     )
                     1, 2, 3 -> {
                         val idx = page - 1
-                        val cfg = hotkeys.getOrElse(idx) { HotkeyConfig("热键${idx + 1}") }
-                        HotkeyTab(cfg = cfg.copy(name = "热键${idx + 1}")) {
-                            onHotkeyChanged(idx, it.copy(name = "热键${idx + 1}"))
+                        val hotkeyName = text.hotkeyName(idx + 1)
+                        val cfg = hotkeys.getOrElse(idx) { HotkeyConfig(hotkeyName) }
+                        HotkeyTab(text = text, cfg = cfg.copy(name = hotkeyName)) {
+                            onHotkeyChanged(idx, it.copy(name = hotkeyName))
                         }
                     }
                     else -> ControlParamTab(
+                        text = text,
                         aimRangeEnabled = aimRangeEnabled,
                         aimRangePercent = aimRangePercent,
                         xKp = xKp,
@@ -4732,6 +5950,7 @@ fun InputControlScreen(
 
 @Composable
 private fun DeviceConnectTab(
+    text: AppTextBundle,
     selectedInputBackend: InputBackend,
     kmboxIp: String,
     kmboxPort: String,
@@ -4764,6 +5983,8 @@ private fun DeviceConnectTab(
     var mappingRevision by rememberSaveable { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val panelColor = Color(0xFFEFEFEF)
+    val mouseLabels = remember(text.language) { List(MOUSE_BUTTON_INDICATORS.size) { index -> text.mouseButtonLabel(index) } }
+    val pressedJoiner = if (text.language == AppLanguage.English) ", " else "、"
     val permissionIntent = remember(context) {
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             // UsbManager.requestPermission may attach extras at send time on some ROMs.
@@ -4788,7 +6009,7 @@ private fun DeviceConnectTab(
         MakcuTestConfig.drawStepDelayMs = drawDelayMs.roundToInt().coerceIn(2, 22).toLong()
     }
 
-    Text("输入后端", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF4A4A4A))
+    Text(text.inputBackendTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF4A4A4A))
     InputSegmentedControl(
         options = InputBackend.entries.map { it.label },
         selectedIndex = InputBackend.entries.indexOf(selectedInputBackend).coerceAtLeast(0),
@@ -4798,6 +6019,7 @@ private fun DeviceConnectTab(
 
     if (selectedInputBackend == InputBackend.KmboxNet) {
         KmboxNetConnectTab(
+            text = text,
             kmboxIp = kmboxIp,
             kmboxPort = kmboxPort,
             kmboxUuid = kmboxUuid,
@@ -4836,8 +6058,13 @@ private fun DeviceConnectTab(
             usbManager?.requestPermission(device, permissionIntent)
         }.onFailure { t ->
             val detail = t.message?.take(80)?.ifBlank { null } ?: t.javaClass.simpleName
-            MakcuLinkRuntime.updateStatus("USB 授权请求异常: $detail")
-            Toast.makeText(context, "USB 授权请求异常: $detail", Toast.LENGTH_SHORT).show()
+            val status = when (text.language) {
+                AppLanguage.English -> "USB permission request exception: $detail"
+                AppLanguage.SimplifiedChinese -> "USB 授权请求异常: $detail"
+                AppLanguage.TraditionalChinese -> "USB 授權請求異常: $detail"
+            }
+            MakcuLinkRuntime.updateStatus(status)
+            Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -4848,19 +6075,39 @@ private fun DeviceConnectTab(
 
     fun sendDrawPattern(pattern: MakcuDrawPattern) {
         val manager = usbManager ?: run {
-            Toast.makeText(context, "当前设备不支持 USB 管理器", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                context,
+                when (text.language) {
+                    AppLanguage.English -> "USB manager is not available on this device"
+                    AppLanguage.SimplifiedChinese -> "当前设备不支持 USB 管理器"
+                    AppLanguage.TraditionalChinese -> "目前裝置不支援 USB 管理器"
+                },
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
         if (calibrationRunning) {
             calibrationRunning = false
             calibrationWaitRelease = true
             calibrationPrevRawMask = 0
-            calibrationMessage = "已停止校准，开始轨迹测试"
+            calibrationMessage = when (text.language) {
+                AppLanguage.English -> "Calibration stopped, starting trajectory test"
+                AppLanguage.SimplifiedChinese -> "已停止校准，开始轨迹测试"
+                AppLanguage.TraditionalChinese -> "已停止校準，開始軌跡測試"
+            }
             MakcuLinkRuntime.recoverMakcuAfterCalibration()
         }
         val activeDeviceId = if (selectedDeviceId >= 0) selectedDeviceId else linkState.deviceId
         val device = usbDevices.firstOrNull { it.deviceId == activeDeviceId && manager.hasPermission(it) } ?: run {
-            Toast.makeText(context, "未连接可发送命令的 USB 设备", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                context,
+                when (text.language) {
+                    AppLanguage.English -> "No connected USB device can send commands"
+                    AppLanguage.SimplifiedChinese -> "未连接可发送命令的 USB 设备"
+                    AppLanguage.TraditionalChinese -> "未連線可發送命令的 USB 裝置"
+                },
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
         val session = MakcuLinkRuntime.session()
@@ -4881,14 +6128,14 @@ private fun DeviceConnectTab(
                         sendMakcuDrawPatternBroadcast(manager, device, pattern, preferred = session)
                     }
                 }
-                val status = if (result.success) "最近发送: ${result.message}" else "发送失败: ${result.message}"
+                val status = if (result.success) text.lastSentStatus(result.message) else text.sendFailedStatus(result.message)
                 MakcuLinkRuntime.updateStatus(status)
                 Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (t: Throwable) {
                 val detail = t.message?.take(80)?.ifBlank { null } ?: t.javaClass.simpleName
-                val status = "发送异常: $detail"
+                val status = text.sendExceptionStatus(detail)
                 MakcuLinkRuntime.updateStatus(status)
                 Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
             }
@@ -4897,7 +6144,15 @@ private fun DeviceConnectTab(
 
     fun startCalibration() {
         if (!linkState.connected) {
-            Toast.makeText(context, "请先连接 MAKCU 设备", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                context,
+                when (text.language) {
+                    AppLanguage.English -> "Connect the MAKCU device first"
+                    AppLanguage.SimplifiedChinese -> "请先连接 MAKCU 设备"
+                    AppLanguage.TraditionalChinese -> "請先連線 MAKCU 裝置"
+                },
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
         calibrationRunning = true
@@ -4905,7 +6160,11 @@ private fun DeviceConnectTab(
         calibrationWaitRelease = true
         calibrationPrevRawMask = linkState.rawButtonMask and 0xFFFF
         calibrationReleaseDeadlineMs = System.currentTimeMillis() + 1300L
-        calibrationMessage = "校准开始: 先松开按键(若无法归零会自动继续)"
+        calibrationMessage = when (text.language) {
+            AppLanguage.English -> "Calibration started: release buttons first (continues automatically if not zero)"
+            AppLanguage.SimplifiedChinese -> "校准开始: 先松开按键(若无法归零会自动继续)"
+            AppLanguage.TraditionalChinese -> "校準開始: 先鬆開按鍵(若無法歸零會自動繼續)"
+        }
         MakcuLinkRuntime.requestButtonsSnapshot()
     }
 
@@ -4923,7 +6182,13 @@ private fun DeviceConnectTab(
             ?: usbDevices.firstOrNull { it.deviceId == linkState.deviceId && manager.hasPermission(it) }
             ?: usbDevices.firstOrNull { manager.hasPermission(it) }
             ?: run {
-            MakcuLinkRuntime.updateStatus("未找到可连接设备或尚未授权")
+            MakcuLinkRuntime.updateStatus(
+                when (text.language) {
+                    AppLanguage.English -> "No connectable device found or permission is missing"
+                    AppLanguage.SimplifiedChinese -> "未找到可连接设备或尚未授权"
+                    AppLanguage.TraditionalChinese -> "未找到可連線裝置或尚未授權"
+                }
+            )
             return
         }
         selectedDeviceId = device.deviceId
@@ -4934,8 +6199,13 @@ private fun DeviceConnectTab(
                 }
             }.onFailure { t ->
                 val detail = t.message?.take(80)?.ifBlank { null } ?: t.javaClass.simpleName
-                MakcuLinkRuntime.updateStatus("连接异常: $detail")
-                Toast.makeText(context, "连接异常: $detail", Toast.LENGTH_SHORT).show()
+                val status = when (text.language) {
+                    AppLanguage.English -> "Connection exception: $detail"
+                    AppLanguage.SimplifiedChinese -> "连接异常: $detail"
+                    AppLanguage.TraditionalChinese -> "連線異常: $detail"
+                }
+                MakcuLinkRuntime.updateStatus(status)
+                Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -4954,10 +6224,32 @@ private fun DeviceConnectTab(
                                 if (preferred != null) {
                                     selectedDeviceId = preferred.deviceId
                                 }
-                                MakcuLinkRuntime.updateStatus("USB 授权成功，请点击连接")
-                                Toast.makeText(context, "USB 授权成功", Toast.LENGTH_SHORT).show()
+                                MakcuLinkRuntime.updateStatus(
+                                    when (text.language) {
+                                        AppLanguage.English -> "USB permission granted, tap connect"
+                                        AppLanguage.SimplifiedChinese -> "USB 授权成功，请点击连接"
+                                        AppLanguage.TraditionalChinese -> "USB 授權成功，請點擊連線"
+                                    }
+                                )
+                                Toast.makeText(
+                                    context,
+                                    when (text.language) {
+                                        AppLanguage.English -> "USB permission granted"
+                                        AppLanguage.SimplifiedChinese -> "USB 授权成功"
+                                        AppLanguage.TraditionalChinese -> "USB 授權成功"
+                                    },
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             } else {
-                                Toast.makeText(context, "USB 授权被拒绝", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(
+                                    context,
+                                    when (text.language) {
+                                        AppLanguage.English -> "USB permission denied"
+                                        AppLanguage.SimplifiedChinese -> "USB 授权被拒绝"
+                                        AppLanguage.TraditionalChinese -> "USB 授權被拒絕"
+                                    },
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }
                         }
                         UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
@@ -4975,8 +6267,13 @@ private fun DeviceConnectTab(
                     }
                 }.onFailure { t ->
                     val detail = t.message?.take(80)?.ifBlank { null } ?: t.javaClass.simpleName
-                    MakcuLinkRuntime.updateStatus("USB 广播异常: $detail")
-                    Toast.makeText(context, "USB 广播异常: $detail", Toast.LENGTH_SHORT).show()
+                    val status = when (text.language) {
+                        AppLanguage.English -> "USB broadcast exception: $detail"
+                        AppLanguage.SimplifiedChinese -> "USB 广播异常: $detail"
+                        AppLanguage.TraditionalChinese -> "USB 廣播異常: $detail"
+                    }
+                    MakcuLinkRuntime.updateStatus(status)
+                    Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -5012,12 +6309,24 @@ private fun DeviceConnectTab(
     val mappedMaskHex = "0x${(linkState.buttonMask and 0x1F).toString(16).uppercase(Locale.US)}"
     LaunchedEffect(usbDevices.map { it.deviceId }, linkState.deviceId) {
         if (linkState.deviceId >= 0 && usbDevices.none { it.deviceId == linkState.deviceId }) {
-            MakcuLinkRuntime.disconnect(reason = "设备已断开")
+            MakcuLinkRuntime.disconnect(
+                reason = when (text.language) {
+                    AppLanguage.English -> "Device disconnected"
+                    AppLanguage.SimplifiedChinese -> "设备已断开"
+                    AppLanguage.TraditionalChinese -> "裝置已斷開"
+                }
+            )
         }
     }
     LaunchedEffect(connected) {
         if (!connected && calibrationRunning) {
-            stopCalibration("连接已断开，校准中止")
+            stopCalibration(
+                when (text.language) {
+                    AppLanguage.English -> "Connection lost, calibration stopped"
+                    AppLanguage.SimplifiedChinese -> "连接已断开，校准中止"
+                    AppLanguage.TraditionalChinese -> "連線已斷開，校準中止"
+                }
+            )
         }
     }
     LaunchedEffect(calibrationRunning, connected, calibrationWaitRelease) {
@@ -5030,7 +6339,13 @@ private fun DeviceConnectTab(
     LaunchedEffect(calibrationRunning, calibrationStep, calibrationWaitRelease, linkState.rawButtonMask, connected) {
         if (!calibrationRunning || !connected) return@LaunchedEffect
         if (calibrationStep >= MOUSE_BUTTON_INDICATORS.size) {
-            stopCalibration("按键位校准完成")
+            stopCalibration(
+                when (text.language) {
+                    AppLanguage.English -> "Button calibration completed"
+                    AppLanguage.SimplifiedChinese -> "按键位校准完成"
+                    AppLanguage.TraditionalChinese -> "按鍵位校準完成"
+                }
+            )
             return@LaunchedEffect
         }
         val rawMask = linkState.rawButtonMask and 0xFFFF
@@ -5038,7 +6353,7 @@ private fun DeviceConnectTab(
             val now = System.currentTimeMillis()
             if (rawMask == 0 || now >= calibrationReleaseDeadlineMs) {
                 calibrationWaitRelease = false
-                calibrationMessage = "请按下【${MOUSE_BUTTON_INDICATORS[calibrationStep].label}】"
+                calibrationMessage = text.calibrationPressButtonMessage(mouseLabels[calibrationStep])
                 calibrationPrevRawMask = rawMask
             }
             return@LaunchedEffect
@@ -5052,18 +6367,24 @@ private fun DeviceConnectTab(
         val capturedBit = pickPrimaryRawButtonBit(risingMask, usedBits)
         if (capturedBit == 0) return@LaunchedEffect
         val saved = MouseButtonMapper.setRawBitForLogical(context, calibrationStep, capturedBit)
-        val label = MOUSE_BUTTON_INDICATORS[calibrationStep].label
+        val label = mouseLabels[calibrationStep]
         if (saved) {
             mappingRevision++
             calibrationStep++
             calibrationWaitRelease = true
             calibrationReleaseDeadlineMs = System.currentTimeMillis() + 1300L
-            calibrationMessage = "已记录 $label -> 0x${capturedBit.toString(16).uppercase(Locale.US)}，请松开按键"
+            calibrationMessage = text.calibrationRecordedMessage(label, "0x${capturedBit.toString(16).uppercase(Locale.US)}")
             if (calibrationStep >= MOUSE_BUTTON_INDICATORS.size) {
-                stopCalibration("按键位校准完成")
+                stopCalibration(
+                    when (text.language) {
+                        AppLanguage.English -> "Button calibration completed"
+                        AppLanguage.SimplifiedChinese -> "按键位校准完成"
+                        AppLanguage.TraditionalChinese -> "按鍵位校準完成"
+                    }
+                )
             }
         } else {
-            calibrationMessage = "记录 $label 失败，请重试"
+            calibrationMessage = text.calibrationRecordFailedMessage(label)
         }
     }
 
@@ -5074,7 +6395,7 @@ private fun DeviceConnectTab(
         ) {
             Text("●", color = if (connected) Color(0xFF4CAF50) else Color(0xFFC5C5C5), fontSize = 14.sp)
             Spacer(Modifier.width(10.dp))
-            Text(if (connected) "已连接" else "未连接", fontWeight = FontWeight.SemiBold, color = Color(0xFF4A4A4A), fontSize = 16.sp)
+            Text(if (connected) text.connectedLabel else text.disconnectedLabel, fontWeight = FontWeight.SemiBold, color = Color(0xFF4A4A4A), fontSize = 16.sp)
         }
     }
 
@@ -5082,17 +6403,17 @@ private fun DeviceConnectTab(
         Card(colors = CardDefaults.cardColors(containerColor = panelColor), shape = RoundedCornerShape(16.dp)) {
             Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (connected) "已连接设备" else "当前设备", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF333333))
+                    Text(if (connected) text.connectedDeviceTitle else text.currentDeviceTitle, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF333333))
                     if (connected) {
                         IconButton(onClick = {
                             selectedDeviceId = -1
-                            MakcuLinkRuntime.disconnect(reason = "已断开")
+                            MakcuLinkRuntime.disconnect(reason = text.disconnectLabel)
                         }, modifier = Modifier.size(24.dp)) {
                             Icon(Icons.Default.LinkOff, null, tint = Color(0xFFD32F2F))
                         }
                     } else {
                         TextButton(onClick = { connectSelectedDevice() }) {
-                            Text("连接", color = Color(0xFF2E7D32), fontSize = 12.sp)
+                            Text(text.connectLabel, color = Color(0xFF2E7D32), fontSize = 12.sp)
                         }
                     }
                 }
@@ -5103,10 +6424,10 @@ private fun DeviceConnectTab(
 
         Card(colors = CardDefaults.cardColors(containerColor = panelColor), shape = RoundedCornerShape(16.dp)) {
             Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("设备监控与测试", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF333333))
+                Text(text.deviceMonitorTestTitle, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF333333))
 
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    MOUSE_BUTTON_INDICATORS.forEach { item ->
+                    MOUSE_BUTTON_INDICATORS.forEachIndexed { index, item ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Surface(
                                 shape = CircleShape,
@@ -5116,7 +6437,7 @@ private fun DeviceConnectTab(
                             ) {}
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                item.label,
+                                mouseLabels[index],
                                 fontSize = 11.sp,
                                 color = if ((linkState.buttonMask and item.mask) != 0) Color(0xFF2E7D32) else Color(0xFF555555)
                             )
@@ -5125,15 +6446,15 @@ private fun DeviceConnectTab(
                 }
 
                 val pressedNames = MOUSE_BUTTON_INDICATORS
-                    .filter { (linkState.buttonMask and it.mask) != 0 }
-                    .joinToString("、") { it.label }
+                    .mapIndexedNotNull { index, item -> mouseLabels[index].takeIf { (linkState.buttonMask and item.mask) != 0 } }
+                    .joinToString(pressedJoiner)
                 Text(
-                    text = if (pressedNames.isBlank()) "未检测到鼠标按键按下" else "检测到按下: $pressedNames",
+                    text = text.detectedPressedText(pressedNames),
                     fontSize = 11.sp,
                     color = Color(0xFF5E5E5E)
                 )
                 Text(
-                    text = "RAW=$rawMaskHex  映射后=$mappedMaskHex",
+                    text = "RAW=$rawMaskHex  ${text.mappingPrefix}=$mappedMaskHex",
                     fontSize = 11.sp,
                     color = Color(0xFF616161)
                 )
@@ -5150,8 +6471,8 @@ private fun DeviceConnectTab(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text("调试模式", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
-                                Text("显示解析来源和最近 RX 摘要", fontSize = 10.sp, color = Color(0xFF757575))
+                                Text(text.debugModeTitle, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
+                                Text(text.parserDebugHint, fontSize = 10.sp, color = Color(0xFF757575))
                             }
                             InputGraySwitch(checked = showDeviceDebug, onCheckedChange = onShowDeviceDebugChange)
                         }
@@ -5168,8 +6489,8 @@ private fun DeviceConnectTab(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text("安全回退", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
-                                Text("长按卡住时尝试自动清零", fontSize = 10.sp, color = Color(0xFF757575))
+                                Text(text.safetyFallbackTitle, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
+                                Text(text.safetyFallbackHint, fontSize = 10.sp, color = Color(0xFF757575))
                             }
                             InputGraySwitch(checked = enableStuckHoldRecovery, onCheckedChange = onEnableStuckHoldRecoveryChange)
                         }
@@ -5177,7 +6498,7 @@ private fun DeviceConnectTab(
                 }
                 if (showDeviceDebug && linkState.debugInfo.isNotBlank()) {
                     Text(
-                        text = "解析调试: ${linkState.debugInfo}",
+                        text = "${text.parseDebugPrefix}: ${linkState.debugInfo}",
                         fontSize = 10.sp,
                         color = Color(0xFF757575)
                     )
@@ -5191,17 +6512,17 @@ private fun DeviceConnectTab(
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(1.dp, Color(0xFFBDBDBD))
-                    ) { Text("画正方形", fontSize = 12.sp, color = Color(0xFF555555)) }
+                    ) { Text(text.drawSquareLabel, fontSize = 12.sp, color = Color(0xFF555555)) }
                     OutlinedButton(
                         onClick = { sendDrawPattern(MakcuDrawPattern.Circle) },
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(1.dp, Color(0xFFBDBDBD))
-                    ) { Text("画圆形", fontSize = 12.sp, color = Color(0xFF555555)) }
+                    ) { Text(text.drawCircleLabel, fontSize = 12.sp, color = Color(0xFF555555)) }
                 }
                 LabeledGraySlider(
-                    title = "轨迹速度 (越快数值越小)",
-                    valueLabel = "${drawDelayMs.roundToInt().coerceIn(2, 22)} ms/步",
+                    title = text.trajectorySpeedTitle,
+                    valueLabel = text.trajectorySpeedValueLabel(drawDelayMs.roundToInt().coerceIn(2, 22)),
                     value = drawDelayMs,
                     onValueChange = { drawDelayMs = it },
                     valueRange = 2f..22f
@@ -5213,12 +6534,12 @@ private fun DeviceConnectTab(
                     MouseButtonMapper.snapshot()
                 }
                 val mappingText = MOUSE_BUTTON_INDICATORS.indices.joinToString("  ") { index ->
-                    val logical = MOUSE_BUTTON_INDICATORS[index].label
+                    val logical = mouseLabels[index]
                     val raw = mapping.getOrElse(index) { MOUSE_BUTTON_INDICATORS[index].mask }
                     "$logical->0x${raw.toString(16).uppercase(Locale.US)}"
                 }
                 Text(
-                    text = "按键位映射: $mappingText",
+                    text = "${text.mappingPrefix}: $mappingText",
                     fontSize = 11.sp,
                     color = Color(0xFF616161)
                 )
@@ -5227,7 +6548,13 @@ private fun DeviceConnectTab(
                     Button(
                         onClick = {
                             if (calibrationRunning) {
-                                stopCalibration("已取消按键位校准")
+                                stopCalibration(
+                                    when (text.language) {
+                                        AppLanguage.English -> "Button calibration cancelled"
+                                        AppLanguage.SimplifiedChinese -> "已取消按键位校准"
+                                        AppLanguage.TraditionalChinese -> "已取消按鍵位校準"
+                                    }
+                                )
                             } else {
                                 startCalibration()
                             }
@@ -5241,9 +6568,9 @@ private fun DeviceConnectTab(
                     ) {
                         val title = if (calibrationRunning) {
                             val progress = (calibrationStep + 1).coerceAtMost(MOUSE_BUTTON_INDICATORS.size)
-                            "停止校准($progress/5)"
+                            text.calibrationStopLabel(progress, MOUSE_BUTTON_INDICATORS.size)
                         } else {
-                            "按键位校准"
+                            text.calibrationButtonTitle
                         }
                         Text(title, fontSize = 12.sp)
                     }
@@ -5251,12 +6578,18 @@ private fun DeviceConnectTab(
                         onClick = {
                             MouseButtonMapper.resetDefault(context)
                             mappingRevision++
-                            stopCalibration("已恢复默认映射")
+                            stopCalibration(
+                                when (text.language) {
+                                    AppLanguage.English -> "Default mapping restored"
+                                    AppLanguage.SimplifiedChinese -> "已恢复默认映射"
+                                    AppLanguage.TraditionalChinese -> "已恢復預設映射"
+                                }
+                            )
                         },
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(1.dp, Color(0xFFBDBDBD))
-                    ) { Text("恢复默认", fontSize = 12.sp, color = Color(0xFF555555)) }
+                    ) { Text(text.restoreDefaultLabel, fontSize = 12.sp, color = Color(0xFF555555)) }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
@@ -5264,7 +6597,7 @@ private fun DeviceConnectTab(
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(1.dp, Color(0xFFBDBDBD))
-                    ) { Text("主动轮询按键", fontSize = 12.sp, color = Color(0xFF555555)) }
+                    ) { Text(text.pollButtonsLabel, fontSize = 12.sp, color = Color(0xFF555555)) }
                     Surface(
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(12.dp),
@@ -5274,7 +6607,7 @@ private fun DeviceConnectTab(
                         val info = if (calibrationMessage.isNotBlank()) {
                             calibrationMessage
                         } else {
-                            "准备就绪"
+                            text.readyLabel
                         }
                         Text(
                             info,
@@ -5289,7 +6622,7 @@ private fun DeviceConnectTab(
                     Text(
                         linkState.status,
                         fontSize = 11.sp,
-                        color = if (linkState.status.contains("失败") || linkState.status.contains("异常")) Color(0xFFD32F2F) else Color(0xFF2E7D32)
+                        color = if (isFailureStatus(linkState.status)) Color(0xFFD32F2F) else Color(0xFF2E7D32)
                     )
                 }
             }
@@ -5302,7 +6635,7 @@ private fun DeviceConnectTab(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("USB 诊断", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF3A3A3A))
+        Text(text.usbDiagnosticsTitle, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF3A3A3A))
         Button(
             onClick = {
                 val latest = refreshUsbDevices()
@@ -5312,7 +6645,7 @@ private fun DeviceConnectTab(
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7F7F7F), contentColor = Color.White),
             contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp)
         ) {
-            Text("刷新", fontSize = 13.sp)
+            Text(text.refreshLabel, fontSize = 13.sp)
         }
     }
 
@@ -5322,14 +6655,14 @@ private fun DeviceConnectTab(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("✓  USB Host: 支持", fontSize = 14.sp, color = Color(0xFF333333))
-            Text("部分手机需在设置中开启 OTG 功能", color = Color(0xFF5F5F5F), fontSize = 12.sp)
-            Text("检测到设备: $usbCount 个", fontSize = 14.sp, color = Color(0xFF333333))
+            Text("✓  ${text.usbHostSupportedLabel}", fontSize = 14.sp, color = Color(0xFF333333))
+            Text(text.otgHint, color = Color(0xFF5F5F5F), fontSize = 12.sp)
+            Text(text.detectedDeviceCountText(usbCount), fontSize = 14.sp, color = Color(0xFF333333))
             Text("${Build.MODEL} / Android ${Build.VERSION.RELEASE}", fontSize = 12.sp, color = Color(0xFF5E5E5E))
         }
     }
 
-    Text("点击设备进行连接", fontSize = 12.sp, color = Color(0xFF666666))
+    Text(text.tapDeviceToConnectHint, fontSize = 12.sp, color = Color(0xFF666666))
 
     usbDevices.forEach { device ->
         val hasPermission = usbManager?.hasPermission(device) == true
@@ -5354,7 +6687,7 @@ private fun DeviceConnectTab(
                     Text(usbVidPid(device), fontSize = 12.sp, color = Color(0xFF666666))
                 }
                 Text(
-                    text = if (hasPermission) "已授权" else "授权",
+                    text = if (hasPermission) text.authorizedLabel else text.authorizeLabel,
                     color = if (hasPermission) Color(0xFF7A7A7A) else Color(0xFF2E7D32),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -5367,6 +6700,7 @@ private fun DeviceConnectTab(
 
 @Composable
 private fun KmboxNetConnectTab(
+    text: AppTextBundle,
     kmboxIp: String,
     kmboxPort: String,
     kmboxUuid: String,
@@ -5389,6 +6723,8 @@ private fun KmboxNetConnectTab(
     val connected = linkState.connected
     val rawMaskHex = "0x${(linkState.rawButtonMask and 0xFFFF).toString(16).uppercase(Locale.US)}"
     val mappedMaskHex = "0x${(linkState.buttonMask and 0x1F).toString(16).uppercase(Locale.US)}"
+    val mouseLabels = remember(text.language) { List(MOUSE_BUTTON_INDICATORS.size) { index -> text.mouseButtonLabel(index) } }
+    val pressedJoiner = if (text.language == AppLanguage.English) ", " else "、"
 
     fun connectKmbox() {
         val port = kmboxPort.toIntOrNull()?.coerceIn(1, 65535) ?: KMBOX_NET_DEFAULT_PORT
@@ -5401,7 +6737,11 @@ private fun KmboxNetConnectTab(
                 monitorPort = monitorPort
             )
         } catch (t: Throwable) {
-            val detail = t.message?.take(80)?.ifBlank { null } ?: "参数无效"
+            val detail = t.message?.take(80)?.ifBlank { null } ?: when (text.language) {
+                AppLanguage.English -> "Invalid parameters"
+                AppLanguage.SimplifiedChinese -> "参数无效"
+                AppLanguage.TraditionalChinese -> "參數無效"
+            }
             Toast.makeText(context, detail, Toast.LENGTH_SHORT).show()
             return
         }
@@ -5415,12 +6755,20 @@ private fun KmboxNetConnectTab(
     fun sendDrawPattern(pattern: MakcuDrawPattern) {
         val session = KmboxNetRuntime.session()
         if (session == null) {
-            Toast.makeText(context, "请先连接 KMBOX NET", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                context,
+                when (text.language) {
+                    AppLanguage.English -> "Connect KMBOX NET first"
+                    AppLanguage.SimplifiedChinese -> "请先连接 KMBOX NET"
+                    AppLanguage.TraditionalChinese -> "請先連線 KMBOX NET"
+                },
+                Toast.LENGTH_SHORT
+            ).show()
             return
         }
         scope.launch {
             val result = withContext(Dispatchers.IO) { sendKmboxDrawPattern(session, pattern) }
-            val status = if (result.success) "最近发送: ${result.message}" else "发送失败: ${result.message}"
+            val status = if (result.success) text.lastSentStatus(result.message) else text.sendFailedStatus(result.message)
             KmboxNetRuntime.updateStatus(status)
             Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
         }
@@ -5433,15 +6781,15 @@ private fun KmboxNetConnectTab(
         ) {
             Text("●", color = if (connected) Color(0xFF4CAF50) else Color(0xFFC5C5C5), fontSize = 14.sp)
             Spacer(Modifier.width(10.dp))
-            Text(if (connected) "KMBOX 已连接" else "KMBOX 未连接", fontWeight = FontWeight.SemiBold, color = Color(0xFF4A4A4A), fontSize = 16.sp)
+            Text(if (connected) text.kmboxConnectedLabel else text.kmboxDisconnectedLabel, fontWeight = FontWeight.SemiBold, color = Color(0xFF4A4A4A), fontSize = 16.sp)
             Spacer(Modifier.weight(1f))
             if (connected) {
-                TextButton(onClick = { KmboxNetRuntime.disconnect("已断开") }) {
-                    Text("断开", color = Color(0xFFD32F2F), fontSize = 12.sp)
+                TextButton(onClick = { KmboxNetRuntime.disconnect(text.disconnectLabel) }) {
+                    Text(text.disconnectLabel, color = Color(0xFFD32F2F), fontSize = 12.sp)
                 }
             } else {
                 TextButton(onClick = { connectKmbox() }) {
-                    Text("连接", color = Color(0xFF2E7D32), fontSize = 12.sp)
+                    Text(text.connectLabel, color = Color(0xFF2E7D32), fontSize = 12.sp)
                 }
             }
         }
@@ -5449,11 +6797,11 @@ private fun KmboxNetConnectTab(
 
     Card(colors = CardDefaults.cardColors(containerColor = panelColor), shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("KMBOX NET 配置", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF333333))
+            Text(text.kmboxConfigTitle, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF333333))
             OutlinedTextField(
                 value = kmboxIp,
                 onValueChange = onKmboxIpChange,
-                label = { Text("设备 IP") },
+                label = { Text(text.deviceIpFieldLabel) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
@@ -5461,7 +6809,7 @@ private fun KmboxNetConnectTab(
                 OutlinedTextField(
                     value = kmboxPort,
                     onValueChange = onKmboxPortChange,
-                    label = { Text("控制端口") },
+                    label = { Text(text.controlPortFieldLabel) },
                     modifier = Modifier.weight(1f),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true
@@ -5469,7 +6817,7 @@ private fun KmboxNetConnectTab(
                 OutlinedTextField(
                     value = kmboxMonitorPort,
                     onValueChange = onKmboxMonitorPortChange,
-                    label = { Text("监听端口") },
+                    label = { Text(text.listenPortLabel) },
                     modifier = Modifier.weight(1f),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true
@@ -5478,20 +6826,20 @@ private fun KmboxNetConnectTab(
             OutlinedTextField(
                 value = kmboxUuid,
                 onValueChange = onKmboxUuidChange,
-                label = { Text("UUID (8位十六进制)") },
+                label = { Text(text.uuidFieldLabel) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
-            Text("示例：IP `192.168.2.188`，控制端口 `6234`，监听端口建议 `6235`。", fontSize = 11.sp, color = Color(0xFF707070))
+            Text(text.kmboxExampleHint, fontSize = 11.sp, color = Color(0xFF707070))
         }
     }
 
     Card(colors = CardDefaults.cardColors(containerColor = panelColor), shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("设备监控与测试", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF333333))
+            Text(text.deviceMonitorTestTitle, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF333333))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                MOUSE_BUTTON_INDICATORS.forEach { item ->
+                MOUSE_BUTTON_INDICATORS.forEachIndexed { index, item ->
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Surface(
                             shape = CircleShape,
@@ -5501,7 +6849,7 @@ private fun KmboxNetConnectTab(
                         ) {}
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            item.label,
+                            mouseLabels[index],
                             fontSize = 11.sp,
                             color = if ((linkState.buttonMask and item.mask) != 0) Color(0xFF2E7D32) else Color(0xFF555555)
                         )
@@ -5510,15 +6858,15 @@ private fun KmboxNetConnectTab(
             }
 
             val pressedNames = MOUSE_BUTTON_INDICATORS
-                .filter { (linkState.buttonMask and it.mask) != 0 }
-                .joinToString("、") { it.label }
+                .mapIndexedNotNull { index, item -> mouseLabels[index].takeIf { (linkState.buttonMask and item.mask) != 0 } }
+                .joinToString(pressedJoiner)
             Text(
-                text = if (pressedNames.isBlank()) "未检测到鼠标按键按下" else "检测到按下: $pressedNames",
+                text = text.detectedPressedText(pressedNames),
                 fontSize = 11.sp,
                 color = Color(0xFF5E5E5E)
             )
             Text(
-                text = "RAW=$rawMaskHex  映射后=$mappedMaskHex",
+                text = "RAW=$rawMaskHex  ${text.mappingPrefix}=$mappedMaskHex",
                 fontSize = 11.sp,
                 color = Color(0xFF616161)
             )
@@ -5536,8 +6884,16 @@ private fun KmboxNetConnectTab(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("调试模式", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
-                            Text("显示监控收包和发送摘要", fontSize = 10.sp, color = Color(0xFF757575))
+                            Text(text.debugModeTitle, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
+                            Text(
+                                when (text.language) {
+                                    AppLanguage.English -> "Show monitor packets and send summaries."
+                                    AppLanguage.SimplifiedChinese -> "显示监控收包和发送摘要"
+                                    AppLanguage.TraditionalChinese -> "顯示監控收包和發送摘要"
+                                },
+                                fontSize = 10.sp,
+                                color = Color(0xFF757575)
+                            )
                         }
                         InputGraySwitch(checked = showDeviceDebug, onCheckedChange = onShowDeviceDebugChange)
                     }
@@ -5554,8 +6910,16 @@ private fun KmboxNetConnectTab(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("安全回退", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
-                            Text("监控超时且长按时自动清零", fontSize = 10.sp, color = Color(0xFF757575))
+                            Text(text.safetyFallbackTitle, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF454545))
+                            Text(
+                                when (text.language) {
+                                    AppLanguage.English -> "Clear stuck input automatically when monitor times out."
+                                    AppLanguage.SimplifiedChinese -> "监控超时且长按时自动清零"
+                                    AppLanguage.TraditionalChinese -> "監控超時且長按時自動清零"
+                                },
+                                fontSize = 10.sp,
+                                color = Color(0xFF757575)
+                            )
                         }
                         InputGraySwitch(checked = enableStuckHoldRecovery, onCheckedChange = onEnableStuckHoldRecoveryChange)
                     }
@@ -5564,7 +6928,7 @@ private fun KmboxNetConnectTab(
 
             if (showDeviceDebug && linkState.debugInfo.isNotBlank()) {
                 Text(
-                    text = "协议调试: ${linkState.debugInfo}",
+                    text = "${text.protocolDebugPrefix}: ${linkState.debugInfo}",
                     fontSize = 10.sp,
                     color = Color(0xFF757575)
                 )
@@ -5578,17 +6942,17 @@ private fun KmboxNetConnectTab(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp),
                     border = BorderStroke(1.dp, Color(0xFFBDBDBD))
-                ) { Text("画正方形", fontSize = 12.sp, color = Color(0xFF555555)) }
+                ) { Text(text.drawSquareLabel, fontSize = 12.sp, color = Color(0xFF555555)) }
                 OutlinedButton(
                     onClick = { sendDrawPattern(MakcuDrawPattern.Circle) },
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp),
                     border = BorderStroke(1.dp, Color(0xFFBDBDBD))
-                ) { Text("画圆形", fontSize = 12.sp, color = Color(0xFF555555)) }
+                ) { Text(text.drawCircleLabel, fontSize = 12.sp, color = Color(0xFF555555)) }
             }
             LabeledGraySlider(
-                title = "轨迹速度 (越快数值越小)",
-                valueLabel = "${drawDelayMs.roundToInt().coerceIn(2, 22)} ms/步",
+                title = text.trajectorySpeedTitle,
+                valueLabel = text.trajectorySpeedValueLabel(drawDelayMs.roundToInt().coerceIn(2, 22)),
                 value = drawDelayMs,
                 onValueChange = onDrawDelayChange,
                 valueRange = 2f..22f
@@ -5598,7 +6962,7 @@ private fun KmboxNetConnectTab(
                 Text(
                     linkState.status,
                     fontSize = 11.sp,
-                    color = if (linkState.status.contains("失败") || linkState.status.contains("异常")) Color(0xFFD32F2F) else Color(0xFF2E7D32)
+                    color = if (isFailureStatus(linkState.status)) Color(0xFFD32F2F) else Color(0xFF2E7D32)
                 )
             }
         }
@@ -5606,9 +6970,10 @@ private fun KmboxNetConnectTab(
 }
 
 @Composable
-private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
+private fun HotkeyTab(text: AppTextBundle, cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
     val panelColor = Color(0xFFEFEFEF)
-    val triggerOptions = listOf("左", "右", "中", "上侧", "下侧")
+    val triggerValues = listOf("左", "右", "中", "上侧", "下侧")
+    val triggerOptions = remember(text.language) { List(triggerValues.size) { index -> text.mouseButtonLabel(index) } }
     val classColors = listOf(Color(0xFFE57373), Color(0xFF4DB6AC), Color(0xFF64B5F6), Color(0xFFFFB74D))
     val enabledCategories = if (cfg.enabledCategories.size == 4) cfg.enabledCategories else listOf(true, true, true, true)
     val categoryOrder = normalizeCategoryOrder(cfg.categoryOrder)
@@ -5618,33 +6983,33 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("${cfg.name}开关", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3D3D3D))
-                    Text(if (cfg.enabled) "已启用" else "已禁用", color = Color(0xFF717171), fontSize = 12.sp)
+                    Text("${cfg.name}${text.hotkeySwitchSuffix}", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3D3D3D))
+                    Text(if (cfg.enabled) text.enabledStateLabel else text.disabledStateLabel, color = Color(0xFF717171), fontSize = 12.sp)
                 }
                 InputGraySwitch(checked = cfg.enabled, onCheckedChange = { onChange(cfg.copy(enabled = it)) })
             }
 
-            Text("触发按键", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF444444))
+            Text(text.triggerButtonTitle, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF444444))
             InputSegmentedControl(
                 options = triggerOptions,
-                selectedIndex = triggerOptions.indexOf(cfg.trigger).takeIf { it >= 0 } ?: 1,
-                onSelect = { index -> onChange(cfg.copy(trigger = triggerOptions[index])) },
+                selectedIndex = triggerValues.indexOf(cfg.trigger).takeIf { it >= 0 } ?: 1,
+                onSelect = { index -> onChange(cfg.copy(trigger = triggerValues[index])) },
                 fontSize = 13.sp
             )
 
             Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFF3F3F3)), shape = RoundedCornerShape(16.dp)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("自动瞄准", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3C3C3C))
+                        Text(text.autoAimTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3C3C3C))
                         InputGraySwitch(checked = cfg.autoAim, onCheckedChange = { onChange(cfg.copy(autoAim = it)) })
                     }
                     AnimatedVisibility(visible = cfg.autoAim, enter = expandVertically(), exit = shrinkVertically()) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             HorizontalDivider(color = Color(0xFFDADADA), thickness = 1.dp)
 
-                            Text("目标选择模式", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF444444))
+                            Text(text.targetSelectionModeTitle, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF444444))
                             InputSegmentedControl(
-                                options = listOf("最近准星", "类别优先"),
+                                options = listOf(text.modeRecentCrosshairLabel, text.modeClassPriorityLabel),
                                 selectedIndex = if (cfg.aimMode == "recent_crosshair") 0 else 1,
                                 onSelect = { index ->
                                     onChange(cfg.copy(aimMode = if (index == 0) "recent_crosshair" else "class_priority"))
@@ -5653,7 +7018,7 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                             )
 
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Text("瞄准类别", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3C3C3C))
+                                Text(text.aimCategoryTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3C3C3C))
                                 InputGraySwitch(checked = cfg.aimByCategory, onCheckedChange = { onChange(cfg.copy(aimByCategory = it)) })
                             }
 
@@ -5662,13 +7027,13 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                                     val color = classColors[index]
                                     val enabled = enabledCategories[index]
                                     Surface(
-                                        modifier = Modifier.weight(1f).clickable(enabled = cfg.aimByCategory) {
+                                        modifier = Modifier.weight(1f).clickable {
                                             val next = enabledCategories.toMutableList()
                                             next[index] = !next[index]
                                             onChange(cfg.copy(enabledCategories = next))
                                         },
                                         shape = RoundedCornerShape(10.dp),
-                                        color = color.copy(alpha = if (enabled && cfg.aimByCategory) 0.26f else 0.10f),
+                                        color = color.copy(alpha = if (enabled) 0.26f else 0.08f),
                                         border = BorderStroke(1.dp, color)
                                     ) {
                                         Row(
@@ -5678,7 +7043,12 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                                         ) {
                                             Text("●", color = color, fontSize = 16.sp)
                                             Spacer(Modifier.width(4.dp))
-                                            Text("类$index", color = Color(0xFF414141), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                            Text(
+                                                text.classShortLabel(index),
+                                                color = if (enabled) Color(0xFF414141) else Color(0xFF8A8A8A),
+                                                fontSize = 13.sp,
+                                                fontWeight = if (enabled) FontWeight.SemiBold else FontWeight.Medium
+                                            )
                                         }
                                     }
                                 }
@@ -5687,8 +7057,8 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                             if (cfg.aimMode == "class_priority") {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                     Column {
-                                        Text("类别优先级", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3C3C3C))
-                                        Text("长按拖拽调整顺序", color = Color(0xFF757575), fontSize = 12.sp)
+                                        Text(text.classPriorityTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3C3C3C))
+                                        Text(text.classPriorityHint, color = Color(0xFF757575), fontSize = 12.sp)
                                     }
                                     InputGraySwitch(
                                         checked = cfg.categoryPriorityEnabled,
@@ -5696,41 +7066,20 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                                     )
                                 }
                                 AnimatedVisibility(visible = cfg.categoryPriorityEnabled, enter = expandVertically(), exit = shrinkVertically()) {
-                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        categoryOrder.forEachIndexed { index, klass ->
-                                            Surface(color = Color(0xFFF8F8F8), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-                                                Row(
-                                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Text("${index + 1}.  类别 $klass", fontSize = 13.sp, color = Color(0xFF444444))
-                                                    Text(
-                                                        "☰",
-                                                        fontSize = 16.sp,
-                                                        color = Color(0xFF5A5A5A),
-                                                        modifier = Modifier.clickable {
-                                                            if (index > 0) {
-                                                                val next = categoryOrder.toMutableList()
-                                                                val tmp = next[index - 1]
-                                                                next[index - 1] = next[index]
-                                                                next[index] = tmp
-                                                                onChange(cfg.copy(categoryOrder = next))
-                                                            }
-                                                        }
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
+                                    CategoryPriorityReorderList(
+                                        text = text,
+                                        categoryOrder = categoryOrder,
+                                        classColors = classColors,
+                                        onOrderChange = { next -> onChange(cfg.copy(categoryOrder = next)) }
+                                    )
                                 }
                             }
 
                             if (cfg.aimByCategory) {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                                        Text("Y轴偏移", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF424242))
-                                        Text("0%=头 100%=脚", color = Color(0xFF6E6E6E), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                        Text(text.yOffsetTitle, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF424242))
+                                        Text(text.yOffsetHint, color = Color(0xFF6E6E6E), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                     }
                                     repeat(4) { index ->
                                         val color = classColors[index]
@@ -5739,7 +7088,7 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                                             Row(Modifier.width(78.dp), verticalAlignment = Alignment.CenterVertically) {
                                                 Text("●", color = color, fontSize = 12.sp)
                                                 Spacer(Modifier.width(4.dp))
-                                                Text("类别$index", fontSize = 12.sp, color = Color(0xFF4A4A4A))
+                                                Text(text.categoryLabel(index), fontSize = 12.sp, color = Color(0xFF4A4A4A))
                                             }
                                             Slider(
                                                 value = value.toFloat(),
@@ -5776,21 +7125,21 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
             Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFF3F3F3)), shape = RoundedCornerShape(16.dp)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("自动射击", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3C3C3C))
+                        Text(text.autoFireTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3C3C3C))
                         InputGraySwitch(checked = cfg.autoFire, onCheckedChange = { onChange(cfg.copy(autoFire = it)) })
                     }
                     AnimatedVisibility(visible = cfg.autoFire, enter = expandVertically(), exit = shrinkVertically()) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             HorizontalDivider(color = Color(0xFFDADADA), thickness = 1.dp)
                             LabeledGraySlider(
-                                title = "射击范围 (px)",
+                                title = text.fireRangeTitle,
                                 valueLabel = "%.1f".format(cfg.fireRangePx),
                                 value = cfg.fireRangePx,
                                 onValueChange = { onChange(cfg.copy(fireRangePx = it.coerceIn(0f, 30f))) },
                                 valueRange = 0f..30f
                             )
                             LabeledGraySlider(
-                                title = "初始延迟 (ms)",
+                                title = text.initialDelayTitle,
                                 valueLabel = cfg.initialDelayMs.toString(),
                                 value = cfg.initialDelayMs.toFloat(),
                                 onValueChange = { onChange(cfg.copy(initialDelayMs = it.roundToInt().coerceIn(0, 500))) },
@@ -5798,8 +7147,8 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                             )
 
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("最小点击", fontSize = 13.sp, color = Color(0xFF4B4B4B))
-                                Text("最大点击", fontSize = 13.sp, color = Color(0xFF4B4B4B))
+                                Text(text.minClickTitle, fontSize = 13.sp, color = Color(0xFF4B4B4B))
+                                Text(text.maxClickTitle, fontSize = 13.sp, color = Color(0xFF4B4B4B))
                             }
                             RangeSlider(
                                 value = cfg.minClick.toFloat()..cfg.maxClick.toFloat(),
@@ -5819,7 +7168,7 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Column(Modifier.weight(1f)) {
                                     LabeledGraySlider(
-                                        title = "间隔最小 (ms)",
+                                        title = text.minIntervalTitle,
                                         valueLabel = cfg.minIntervalMs.toString(),
                                         value = cfg.minIntervalMs.toFloat(),
                                         onValueChange = {
@@ -5831,7 +7180,7 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                                 }
                                 Column(Modifier.weight(1f)) {
                                     LabeledGraySlider(
-                                        title = "间隔最大 (ms)",
+                                        title = text.maxIntervalTitle,
                                         valueLabel = cfg.maxIntervalMs.toString(),
                                         value = cfg.maxIntervalMs.toFloat(),
                                         onValueChange = {
@@ -5843,7 +7192,7 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
                                 }
                             }
                             LabeledGraySlider(
-                                title = "连射间隔 (ms)",
+                                title = text.burstIntervalTitle,
                                 valueLabel = cfg.burstIntervalMs.toString(),
                                 value = cfg.burstIntervalMs.toFloat(),
                                 onValueChange = { onChange(cfg.copy(burstIntervalMs = it.roundToInt().coerceIn(10, 1000))) },
@@ -5858,7 +7207,98 @@ private fun HotkeyTab(cfg: HotkeyConfig, onChange: (HotkeyConfig) -> Unit) {
 }
 
 @Composable
+private fun CategoryPriorityReorderList(
+    text: AppTextBundle,
+    categoryOrder: List<Int>,
+    classColors: List<Color>,
+    onOrderChange: (List<Int>) -> Unit
+) {
+    var displayOrder by remember(categoryOrder) { mutableStateOf(normalizeCategoryOrder(categoryOrder)) }
+    var draggingClass by remember { mutableIntStateOf(-1) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    var itemHeightPx by remember { mutableFloatStateOf(1f) }
+    val currentOnOrderChange by rememberUpdatedState(onOrderChange)
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        displayOrder.forEachIndexed { index, klass ->
+            key(klass) {
+                val isDragging = klass == draggingClass
+                Surface(
+                    color = Color(0xFFF8F8F8),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .offset { IntOffset(0, if (isDragging) dragOffsetY.roundToInt() else 0) }
+                        .zIndex(if (isDragging) 1f else 0f)
+                        .onSizeChanged { size ->
+                            if (size.height > 0) itemHeightPx = size.height.toFloat()
+                        }
+                        .pointerInput(klass, categoryOrder) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = {
+                                    draggingClass = klass
+                                    dragOffsetY = 0f
+                                },
+                                onDragEnd = {
+                                    draggingClass = -1
+                                    dragOffsetY = 0f
+                                    val normalized = normalizeCategoryOrder(displayOrder)
+                                    if (normalized != normalizeCategoryOrder(categoryOrder)) {
+                                        currentOnOrderChange(normalized)
+                                    }
+                                },
+                                onDragCancel = {
+                                    draggingClass = -1
+                                    dragOffsetY = 0f
+                                    displayOrder = normalizeCategoryOrder(categoryOrder)
+                                }
+                            ) { change, dragAmount ->
+                                change.consume()
+                                if (draggingClass != klass) return@detectDragGesturesAfterLongPress
+                                dragOffsetY += dragAmount.y
+                                var currentIndex = displayOrder.indexOf(klass)
+                                if (currentIndex < 0) return@detectDragGesturesAfterLongPress
+                                val threshold = (itemHeightPx * 0.55f).coerceAtLeast(1f)
+                                while (dragOffsetY > threshold && currentIndex < displayOrder.lastIndex) {
+                                    val next = displayOrder.toMutableList()
+                                    next[currentIndex] = next[currentIndex + 1]
+                                    next[currentIndex + 1] = klass
+                                    displayOrder = next
+                                    dragOffsetY -= itemHeightPx
+                                    currentIndex += 1
+                                }
+                                while (dragOffsetY < -threshold && currentIndex > 0) {
+                                    val next = displayOrder.toMutableList()
+                                    next[currentIndex] = next[currentIndex - 1]
+                                    next[currentIndex - 1] = klass
+                                    displayOrder = next
+                                    dragOffsetY += itemHeightPx
+                                    currentIndex -= 1
+                                }
+                            }
+                        }
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("●", color = classColors.getOrElse(klass) { Color(0xFF9E9E9E) }, fontSize = 14.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(text.categoryOrderLabel(index, klass), fontSize = 13.sp, color = Color(0xFF444444))
+                        }
+                        Text("☰", fontSize = 16.sp, color = Color(0xFF5A5A5A))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ControlParamTab(
+    text: AppTextBundle,
     aimRangeEnabled: Boolean,
     aimRangePercent: Float,
     onAimRangeEnabledChange: (Boolean) -> Unit,
@@ -5900,11 +7340,12 @@ private fun ControlParamTab(
         }
     }
 
-    Text("PD 控制参数", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF4A4A4A))
-    Text("参数需要由小到大慢慢微调，建议先只调整 Kp 和 Kd", color = Color(0xFF747474), fontSize = 12.sp)
+    Text(text.pdControlTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF4A4A4A))
+    Text(text.pdControlHint, color = Color(0xFF747474), fontSize = 12.sp)
 
     PdAxisPanel(
-        title = "X 轴（水平）",
+        text = text,
+        title = text.xAxisTitle,
         panelColor = panelColor,
         kp = xKp,
         kd = xKd,
@@ -5919,7 +7360,8 @@ private fun ControlParamTab(
     )
 
     PdAxisPanel(
-        title = "Y 轴（垂直）",
+        text = text,
+        title = text.yAxisTitle,
         panelColor = panelColor,
         kp = yKp,
         kd = yKd,
@@ -5935,33 +7377,33 @@ private fun ControlParamTab(
 
     Card(colors = CardDefaults.cardColors(containerColor = panelColor), shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("实时诊断与安全", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3F3F3F))
+            Text(text.diagnosticsSafetyTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3F3F3F))
             Text(
-                "overlay 用于在画面上直接看误差、PD 输出和自动射击状态；调试模式用于设备解析排查。",
+                text.diagnosticsSafetyHint,
                 color = Color(0xFF777777),
                 fontSize = 12.sp
             )
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("PD 诊断 Overlay", fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
-                    Text("在预览画面叠加 err/pd/move/fire 状态", color = Color(0xFF777777), fontSize = 12.sp)
+                    Text(text.pdOverlayTitle, fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
+                    Text(text.pdOverlayHint, color = Color(0xFF777777), fontSize = 12.sp)
                 }
                 InputGraySwitch(checked = showPdOverlay, onCheckedChange = onShowPdOverlayChange)
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("设备调试模式", fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
-                    Text("显示 parser 来源和最近 RX 摘要", color = Color(0xFF777777), fontSize = 12.sp)
+                    Text(text.deviceDebugModeTitle, fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
+                    Text(text.deviceDebugModeHint, color = Color(0xFF777777), fontSize = 12.sp)
                 }
                 InputGraySwitch(checked = showDeviceDebug, onCheckedChange = onShowDeviceDebugChange)
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("卡住长按安全回退", fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
-                    Text("持续无新输入时尝试清零并重启按键流", color = Color(0xFF777777), fontSize = 12.sp)
+                    Text(text.stuckHoldRecoveryTitle, fontWeight = FontWeight.SemiBold, color = Color(0xFF474747))
+                    Text(text.stuckHoldRecoveryHint, color = Color(0xFF777777), fontSize = 12.sp)
                 }
                 InputGraySwitch(checked = enableStuckHoldRecovery, onCheckedChange = onEnableStuckHoldRecoveryChange)
             }
@@ -5974,7 +7416,7 @@ private fun ControlParamTab(
                 append("/")
                 append(if (diagnostics.clampY) "Y" else "-")
             }
-            Text("运行时快照", fontWeight = FontWeight.SemiBold, color = Color(0xFF505050))
+            Text(text.runtimeSnapshotTitle, fontWeight = FontWeight.SemiBold, color = Color(0xFF505050))
             Text(
                 "target=$targetLabel  active=${if (diagnostics.active) "yes" else "no"}  fire=${diagnostics.autoFireState}  inRange=${if (diagnostics.inFireRange) "yes" else "no"}",
                 fontSize = 12.sp,
@@ -5997,18 +7439,18 @@ private fun ControlParamTab(
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column {
-                    Text("瞄准范围限制", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3F3F3F))
-                    Text("只瞄准屏幕中心圆圈内的目标", fontSize = 12.sp, color = Color(0xFF717171))
+                    Text(text.aimRangeLimitTitle, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF3F3F3F))
+                    Text(text.aimRangeLimitHint, fontSize = 12.sp, color = Color(0xFF717171))
                 }
                 InputGraySwitch(checked = aimRangeEnabled, onCheckedChange = onAimRangeEnabledChange)
             }
             AnimatedVisibility(visible = aimRangeEnabled, enter = expandVertically(), exit = shrinkVertically()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("范围半径", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF4A4A4A))
+                        Text(text.rangeRadiusTitle, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color(0xFF4A4A4A))
                         Text("${aimRangePercent.roundToInt()}%", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFF6D6D6D))
                     }
-                    Text("相对于画面短边一半的百分比", color = Color(0xFF777777), fontSize = 12.sp)
+                    Text(text.rangeRadiusHint, color = Color(0xFF777777), fontSize = 12.sp)
                     Slider(
                         value = aimRangePercent,
                         onValueChange = { onAimRangePercentChange(it.coerceIn(0f, 100f)) },
@@ -6098,6 +7540,7 @@ private fun LabeledGraySlider(
 
 @Composable
 private fun PdAxisPanel(
+    text: AppTextBundle,
     title: String,
     panelColor: Color,
     kp: String,
@@ -6115,14 +7558,14 @@ private fun PdAxisPanel(
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(title, fontWeight = FontWeight.Bold, color = Color(0xFF5D5D5D), fontSize = 15.sp)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                PdValueField(label = "比例增益 Kp", value = kp, onValueChange = onKpChange, modifier = Modifier.weight(1f))
-                PdValueField(label = "微分增益 Kd", value = kd, onValueChange = onKdChange, modifier = Modifier.weight(1f))
+                PdValueField(label = text.kpLabel, value = kp, onValueChange = onKpChange, modifier = Modifier.weight(1f))
+                PdValueField(label = text.kdLabel, value = kd, onValueChange = onKdChange, modifier = Modifier.weight(1f))
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                PdValueField(label = "平滑系数", value = smooth, onValueChange = onSmoothChange, modifier = Modifier.weight(1f))
-                PdValueField(label = "死区", value = deadzone, onValueChange = onDeadzoneChange, suffix = "px", modifier = Modifier.weight(1f))
+                PdValueField(label = text.smoothingLabel, value = smooth, onValueChange = onSmoothChange, modifier = Modifier.weight(1f))
+                PdValueField(label = text.deadzoneLabel, value = deadzone, onValueChange = onDeadzoneChange, suffix = "px", modifier = Modifier.weight(1f))
             }
-            PdValueField(label = "最大输出", value = maxOut, onValueChange = onMaxOutChange, suffix = "px", modifier = Modifier.fillMaxWidth())
+            PdValueField(label = text.maxOutputLabel, value = maxOut, onValueChange = onMaxOutChange, suffix = "px", modifier = Modifier.fillMaxWidth())
         }
     }
 }
@@ -7722,7 +9165,8 @@ private fun usbVidPid(device: UsbDevice): String {
 }
 
 @Composable
-fun FunctionScreen(
+private fun FunctionScreen(
+    text: AppTextBundle,
     trackingEnabled: Boolean,
     confirmThreshold: Int,
     vanishThreshold: Int,
@@ -7741,15 +9185,15 @@ fun FunctionScreen(
     val panelColor = Color(0xFFEFEFEF)
 
     Column(Modifier.fillMaxSize().padding(14.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("功能", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+        Text(text.functionTitle, fontSize = 32.sp, fontWeight = FontWeight.Bold)
         Card(colors = CardDefaults.cardColors(containerColor = panelColor), shape = RoundedCornerShape(16.dp)) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("目标追踪", fontWeight = FontWeight.Bold, color = Color.Gray, fontSize = 14.sp)
+                Text(text.targetTrackingTitle, fontWeight = FontWeight.Bold, color = Color.Gray, fontSize = 14.sp)
 
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
-                        Text("启用追踪", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF3E3E3E))
-                        Text("卡尔曼滤波器多目标追踪", fontSize = 12.sp, color = Color(0xFF6B6B6B))
+                        Text(text.enableTrackingTitle, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF3E3E3E))
+                        Text(text.trackingSubtitle, fontSize = 12.sp, color = Color(0xFF6B6B6B))
                     }
                     InputGraySwitch(checked = trackingEnabled, onCheckedChange = onTrackingEnabledChange)
                 }
@@ -7757,58 +9201,58 @@ fun FunctionScreen(
                 AnimatedVisibility(visible = trackingEnabled, enter = expandVertically(), exit = shrinkVertically()) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         LabeledGraySlider(
-                            title = "确认阈值",
+                            title = text.confirmThresholdTitle,
                             valueLabel = confirmThreshold.toString(),
                             value = confirmThreshold.toFloat(),
                             onValueChange = { onConfirmThresholdChange(it.roundToInt().coerceIn(1, 120)) },
                             valueRange = 1f..120f
                         )
-                        Text("连续检测 N 帧后确认为有效目标", color = Color(0xFF777777), fontSize = 12.sp)
+                        Text(text.confirmThresholdHint, color = Color(0xFF777777), fontSize = 12.sp)
 
                         LabeledGraySlider(
-                            title = "消失阈值",
+                            title = text.vanishThresholdTitle,
                             valueLabel = vanishThreshold.toString(),
                             value = vanishThreshold.toFloat(),
                             onValueChange = { onVanishThresholdChange(it.roundToInt().coerceIn(1, 240)) },
                             valueRange = 1f..240f
                         )
-                        Text("丢失后预测 N 帧后删除目标", color = Color(0xFF777777), fontSize = 12.sp)
+                        Text(text.vanishThresholdHint, color = Color(0xFF777777), fontSize = 12.sp)
 
                         LabeledGraySlider(
-                            title = "测量噪声 R",
+                            title = text.measureNoiseTitle,
                             valueLabel = measureNoiseR.roundToInt().toString(),
                             value = measureNoiseR,
                             onValueChange = { onMeasureNoiseRChange(it.coerceIn(0f, 100f)) },
                             valueRange = 0f..100f
                         )
-                        Text("值越大检测框越平滑，但响应越慢", color = Color(0xFF777777), fontSize = 12.sp)
+                        Text(text.measureNoiseHint, color = Color(0xFF777777), fontSize = 12.sp)
 
                         LabeledGraySlider(
-                            title = "消失高度比例",
+                            title = text.vanishHeightRatioTitle,
                             valueLabel = "%.2f".format(vanishHeightRatio),
                             value = vanishHeightRatio,
                             onValueChange = { onVanishHeightRatioChange(it.coerceIn(0f, 1f)) },
                             valueRange = 0f..1f
                         )
-                        Text("高度缩小超过此比例判定为消失", color = Color(0xFF777777), fontSize = 12.sp)
+                        Text(text.vanishHeightRatioHint, color = Color(0xFF777777), fontSize = 12.sp)
 
                         LabeledGraySlider(
-                            title = "消失底部阈值",
+                            title = text.stableBottomThresholdTitle,
                             valueLabel = stableBottomThreshold.roundToInt().toString(),
                             value = stableBottomThreshold,
                             onValueChange = { onStableBottomThresholdChange(it.coerceIn(0f, 100f)) },
                             valueRange = 0f..100f
                         )
-                        Text("底部位置变化小于此值视为稳定", color = Color(0xFF777777), fontSize = 12.sp)
+                        Text(text.stableBottomThresholdHint, color = Color(0xFF777777), fontSize = 12.sp)
 
                         LabeledGraySlider(
-                            title = "边缘检测边距",
+                            title = text.edgeMarginTitle,
                             valueLabel = edgeMargin.roundToInt().toString(),
                             value = edgeMargin,
                             onValueChange = { onEdgeMarginChange(it.coerceIn(0f, 200f)) },
                             valueRange = 0f..200f
                         )
-                        Text("距离边缘小于此值视为边缘目标", color = Color(0xFF777777), fontSize = 12.sp)
+                        Text(text.edgeMarginHint, color = Color(0xFF777777), fontSize = 12.sp)
                     }
                 }
             }
@@ -7817,11 +9261,11 @@ fun FunctionScreen(
 }
 
 @Composable
-fun AboutScreen() {
+private fun AboutScreen(text: AppTextBundle) {
     Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("关于", fontSize = 32.sp, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth().padding(bottom = 30.dp))
+        Text(text.aboutTitle, fontSize = 32.sp, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth().padding(bottom = 30.dp))
         Text("X", fontSize = 80.sp, fontWeight = FontWeight.Bold, color = Color.Gray)
-        Text("阿呆", fontSize = 14.sp, color = Color.Gray)
+        Text(text.aboutAuthor, fontSize = 14.sp, color = Color.Gray)
         Text(APP_NAME, fontSize = 36.sp, fontWeight = FontWeight.Black)
         Text("v$APP_VERSION", fontSize = 14.sp, color = Color.Gray)
         Spacer(Modifier.height(20.dp))
@@ -7832,12 +9276,15 @@ fun AboutScreen() {
 }
 
 @Composable
-fun SettingsScreen(
+private fun SettingsScreen(
+    text: AppTextBundle,
+    selectedLanguage: AppLanguage,
     udpPort: String,
     tcpPort: String,
     inferenceThreads: Int,
     receiveFps: Int,
     dynamicColor: Boolean,
+    onLanguageChange: (AppLanguage) -> Unit,
     onUdpPort: (String) -> Unit,
     onTcpPort: (String) -> Unit,
     onInferenceThreadsChange: (Int) -> Unit,
@@ -7846,16 +9293,41 @@ fun SettingsScreen(
 ) {
     val coreCount = remember { Runtime.getRuntime().availableProcessors().coerceAtLeast(1) }
     val threadValue = inferenceThreads.coerceIn(1, coreCount)
+    val deviceSocSummary = remember { DeviceRuntimeInfo.socSummary() }
+    val deviceHardwareSummary = remember { DeviceRuntimeInfo.hardwareSummary() }
+    val mediaTekSdkStatus = remember(text.language) { mediaTekSdkStatusText(text.language) }
 
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("设置", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+        Text(text.settingsTitle, fontSize = 32.sp, fontWeight = FontWeight.Bold)
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("网络配置", fontWeight = FontWeight.Bold)
-                Text("端口配置需与推流端一致", color = Color.Gray, fontSize = 12.sp)
+                Text(text.languageTitle, fontWeight = FontWeight.Bold)
+                Text(text.languageSubtitle, color = Color.Gray, fontSize = 12.sp)
+                AppLanguage.entries.forEach { language ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onLanguageChange(language) }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = language == selectedLanguage,
+                            onClick = { onLanguageChange(language) }
+                        )
+                        Text(language.displayName, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+        Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(text.networkTitle, fontWeight = FontWeight.Bold)
+                Text(text.networkSubtitle, color = Color.Gray, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = udpPort, onValueChange = { onUdpPort(it.filter(Char::isDigit)) }, label = { Text("UDP 端口") }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
-                    OutlinedTextField(value = tcpPort, onValueChange = { onTcpPort(it.filter(Char::isDigit)) }, label = { Text("TCP 端口") }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+                    OutlinedTextField(value = udpPort, onValueChange = { onUdpPort(it.filter(Char::isDigit)) }, label = { Text(text.udpPortLabel) }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+                    OutlinedTextField(value = tcpPort, onValueChange = { onTcpPort(it.filter(Char::isDigit)) }, label = { Text(text.tcpPortLabel) }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
                 }
             }
         }
@@ -7863,12 +9335,12 @@ fun SettingsScreen(
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("性能设置", fontWeight = FontWeight.Bold)
-                    Text("$coreCount 核心", color = Color.Gray, fontSize = 12.sp)
+                    Text(text.performanceTitle, fontWeight = FontWeight.Bold)
+                    Text("$coreCount ${text.coreCountSuffix}", color = Color.Gray, fontSize = 12.sp)
                 }
 
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("推理线程数", fontWeight = FontWeight.SemiBold)
+                    Text(text.inferenceThreadsLabel, fontWeight = FontWeight.SemiBold)
                     Text(threadValue.toString(), fontWeight = FontWeight.Bold, color = Color.Gray)
                 }
                 Slider(
@@ -7877,10 +9349,10 @@ fun SettingsScreen(
                     valueRange = 1f..coreCount.toFloat(),
                     steps = (coreCount - 2).coerceAtLeast(0)
                 )
-                Text("提示：线程数并非越多越好，建议根据 CPU 大核数量设置，默认 3-4 即可。", color = Color.Gray, fontSize = 12.sp)
+                Text(text.threadHint, color = Color.Gray, fontSize = 12.sp)
 
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("接收帧率", fontWeight = FontWeight.SemiBold)
+                    Text(text.receiveFpsLabel, fontWeight = FontWeight.SemiBold)
                     Text("${receiveFps.coerceIn(30, 240)} Hz", fontWeight = FontWeight.Bold, color = Color.Gray)
                 }
                 Slider(
@@ -7892,14 +9364,17 @@ fun SettingsScreen(
                     valueRange = 30f..240f,
                     steps = 20
                 )
-                Text("限制接收帧率，超出部分丢弃，为推理节省性能开销。", color = Color.Gray, fontSize = 12.sp)
+                Text(text.receiveFpsHint, color = Color.Gray, fontSize = 12.sp)
+                Text("${text.deviceSocLabel}: $deviceSocSummary", color = Color.Gray, fontSize = 12.sp)
+                Text("${text.deviceHardwareLabel}: $deviceHardwareSummary", color = Color.Gray, fontSize = 12.sp)
+                Text("${text.mediatekDirectSdkLabel}: $mediaTekSdkStatus", color = Color.Gray, fontSize = 12.sp)
 
                 Spacer(Modifier.height(4.dp))
-                Text("外观设置", fontWeight = FontWeight.Bold, color = Color.Gray)
+                Text(text.appearanceTitle, fontWeight = FontWeight.Bold, color = Color.Gray)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column {
-                        Text("动态颜色", fontWeight = FontWeight.SemiBold)
-                        Text("跟随系统壁纸配色", fontSize = 12.sp, color = Color.Gray)
+                        Text(text.dynamicColorTitle, fontWeight = FontWeight.SemiBold)
+                        Text(text.dynamicColorSubtitle, fontSize = 12.sp, color = Color.Gray)
                     }
                     Switch(checked = dynamicColor, onCheckedChange = onDynamicColorChange)
                 }
