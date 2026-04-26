@@ -43,6 +43,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.androidx.compose.ui.graphics.lint)
     val neuroPilotAar = file("libs/neuropilot.aar")
 
     implementation(libs.androidx.core.ktx)
@@ -71,6 +72,11 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended:1.6.0")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     implementation("com.github.mik3y:usb-serial-for-android:3.9.0")
+    implementation("com.quickbirdstudios:opencv:4.5.3.0")
+    implementation("com.quickbirdstudios:opencv:4.5.3.0")
+    implementation("com.github.mik3y:usb-serial-for-android:3.9.0")
+    implementation("org.json:json:20230227")
+
     if (neuroPilotAar.exists()) {
         implementation(files(neuroPilotAar))
     }
